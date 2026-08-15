@@ -1,7 +1,7 @@
 {
   "name": "pi-zen",
   "version": "0.1.0",
-  "description": "OpenCode Zen free models in pi \u2014 zero-cost models for the pi coding agent",
+  "description": "OpenCode Zen free models for pi",
   "type": "module",
   "license": "MIT",
   "keywords": [
