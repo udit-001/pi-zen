@@ -1,0 +1,20 @@
+{
+  "name": "pi-zen",
+  "version": "0.1.0",
+  "description": "Pi extension that registers OpenCode Zen free models as a provider",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "opencode-zen"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
