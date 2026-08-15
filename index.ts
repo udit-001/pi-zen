@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 //
@@ -11,14 +14,14 @@ import { createHash, randomUUID } from "node:crypto";
 //   https://opencode.ai/zen/v1/chat/completions
 // so we register a single provider with `api: "openai-completions"`.
 //
-// Get an API key at https://opencode.ai/zen (sign in → billing → copy key), then:
-//   export ZEN_API_KEY="oc_..."
-// and run `/zen` inside pi (or pick a model via `/model`).
+// Get an API key at https://opencode.ai/zen (sign in → billing → copy key), then
+// either run `/login pi-zen` inside pi (stores the key in ~/.pi/agent/auth.json),
+// or export ZEN_API_KEY="oc_...". Then run `/zen` to pick a model (or use `/model`).
 //
 // We also send the same x-opencode-* headers the opencode CLI sends, so Zen
 // treats us as a first-class opencode client (relevant for the free models).
 
-const PROVIDER_ID = "opencode-zen";
+const PROVIDER_ID = "pi-zen";
 const PROVIDER_NAME = "OpenCode Zen (Free)";
 // ZEN_BASE_URL override lets you route through a proxy / local gateway (and is
 // handy for testing). MODELS_URL derives from it.
@@ -152,10 +155,32 @@ let ourModelIds = new Set<string>();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+function getAgentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+}
+
+/** Key stored by `/login pi-zen` in auth.json (pi's official credential store). */
+function getStoredKey(): string {
+	try {
+		const auth = JSON.parse(
+			readFileSync(join(getAgentDir(), "auth.json"), "utf8"),
+		) as Record<string, { type?: string; key?: string }>;
+		const cred = auth[PROVIDER_ID];
+		if (cred?.type === "api_key" && typeof cred.key === "string" && cred.key) {
+			return cred.key;
+		}
+	} catch {
+		// No auth file or unreadable — fall through to env vars.
+	}
+	return "";
+}
+
 function getApiKey(): string {
-	// ZEN_API_KEY is the canonical name (matches the opencode CLI / our Python
+	// Stored credential (from /login) takes priority, matching pi's own resolution.
+	// ZEN_API_KEY is the canonical env name (matches the opencode CLI / our Python
 	// client). OPENCODE_API_KEY / OPENCODE_ZEN_API_KEY are accepted as aliases.
 	return (
+		getStoredKey() ||
 		process.env.ZEN_API_KEY ||
 		process.env.OPENCODE_API_KEY ||
 		process.env.OPENCODE_ZEN_API_KEY ||
@@ -258,7 +283,7 @@ async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
 		models = await fetchModels(true);
 	} catch (err) {
 		console.warn(
-			`opencode-zen: fetch failed (${err instanceof Error ? err.message : String(err)}); using fallback list`,
+			`${PROVIDER_ID}: fetch failed (${err instanceof Error ? err.message : String(err)}); using fallback list`,
 		);
 	}
 	if (models.length === 0) {
@@ -286,7 +311,7 @@ export default async function (pi: ExtensionAPI) {
 
 		if (!getApiKey()) {
 			ctx.ui.notify(
-				`${PROVIDER_ID}: ${count} free model(s). Set OPENCODE_API_KEY to use them.`,
+				`${PROVIDER_ID}: ${count} free model(s). Run /login ${PROVIDER_ID} or set ZEN_API_KEY to use them.`,
 				"warning",
 			);
 		} else {
@@ -392,7 +417,10 @@ export default async function (pi: ExtensionAPI) {
 			}
 			const ok = await pi.setModel(model);
 			if (!ok) {
-				ctx.ui.notify(`${PROVIDER_ID}: no API key set (OPENCODE_API_KEY)`, "error");
+				ctx.ui.notify(
+					`${PROVIDER_ID}: no API key set. Run /login ${PROVIDER_ID} or set ZEN_API_KEY`,
+					"error",
+				);
 				return;
 			}
 			ctx.ui.notify(`Switched to ${PROVIDER_ID}/${chosen.id}`, "success");

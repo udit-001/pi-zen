@@ -11,11 +11,13 @@ pi install git:github.com/udit-001/pi-zen
 ## Setup
 
 1. Get an API key at <https://opencode.ai/zen> (sign in → add billing → copy key).
-2. Export it:
-   ```bash
-   export ZEN_API_KEY="oc_..."
+2. Enter it in pi:
    ```
-3. Run `/zen` in pi to pick a free model, or `/model opencode-zen/big-pickle`.
+   /login pi-zen
+   ```
+   Pi stores the key in `~/.pi/agent/auth.json` (user-only permissions).
+   No env var needed. (Alternatively, set `ZEN_API_KEY` in your shell.)
+3. Run `/zen` in pi to pick a free model, or `/model pi-zen/big-pickle`.
 
 ## Commands
 
