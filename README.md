@@ -27,6 +27,5 @@ No custom commands. pi's built-ins cover everything: `/model` to pick a model, `
 
 | Variable | Purpose |
 | --- | --- |
-| `ZEN_API_KEY` | Zen API key (aliases: `OPENCODE_API_KEY`, `OPENCODE_ZEN_API_KEY`) |
+| `ZEN_API_KEY` | Zen API key (fallback to `/login pi-zen`; for headless/CI use) |
 | `ZEN_BASE_URL` | Override gateway base URL (default `https://opencode.ai/zen/v1`) |
-| `OPENCODE_ZEN_DEFAULT_MODEL` | Auto-select this model on startup (e.g. `big-pickle`) |

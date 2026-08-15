@@ -150,7 +150,6 @@ const FALLBACK_FREE_IDS = Object.keys(FREE_MODEL_META);
 
 let modelCache: { expiresAt: number; models: ZenModel[] } | null = null;
 let hasRegisteredProvider = false;
-let hasAutoSelectedModel = false;
 let ourModelIds = new Set<string>();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -177,15 +176,8 @@ function getStoredKey(): string {
 
 function getApiKey(): string {
 	// Stored credential (from /login) takes priority, matching pi's own resolution.
-	// ZEN_API_KEY is the canonical env name (matches the opencode CLI / our Python
-	// client). OPENCODE_API_KEY / OPENCODE_ZEN_API_KEY are accepted as aliases.
-	return (
-		getStoredKey() ||
-		process.env.ZEN_API_KEY ||
-		process.env.OPENCODE_API_KEY ||
-		process.env.OPENCODE_ZEN_API_KEY ||
-		""
-	);
+	// ZEN_API_KEY is the canonical env fallback for headless/CI use.
+	return getStoredKey() || process.env.ZEN_API_KEY || "";
 }
 
 /** A model is "free" if its id ends in `-free`, or it's the stealth free model. */
@@ -316,22 +308,6 @@ export default async function (pi: ExtensionAPI) {
 			);
 		} else {
 			ctx.ui.notify(`${PROVIDER_ID}: ${count} free model(s) ready`, "success");
-		}
-
-		// Opt-in auto-select: if OPENCODE_ZEN_DEFAULT_MODEL is set, switch to it
-		// once per process. Leaves the user's configured default untouched otherwise.
-		const defaultModelId = process.env.OPENCODE_ZEN_DEFAULT_MODEL || "";
-		if (defaultModelId && !hasAutoSelectedModel) {
-			const model = ctx.modelRegistry.find(PROVIDER_ID, defaultModelId);
-			if (model && (await pi.setModel(model))) {
-				hasAutoSelectedModel = true;
-				ctx.ui.notify(`Switched to ${PROVIDER_ID}/${defaultModelId}`, "info");
-			} else {
-				ctx.ui.notify(
-					`${PROVIDER_ID}: could not select default model "${defaultModelId}"`,
-					"warning",
-				);
-			}
 		}
 	});
 
