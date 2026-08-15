@@ -16,7 +16,7 @@ import { join } from "node:path";
 //
 // Get an API key at https://opencode.ai/zen (sign in → billing → copy key), then
 // either run `/login pi-zen` inside pi (stores the key in ~/.pi/agent/auth.json),
-// or export ZEN_API_KEY="oc_...". Then run `/zen` to pick a model (or use `/model`).
+// or export ZEN_API_KEY="oc_...". Then pick a model via `/model` (pi-zen/*).
 //
 // We also send the same x-opencode-* headers the opencode CLI sends, so Zen
 // treats us as a first-class opencode client (relevant for the free models).
@@ -351,79 +351,6 @@ export default async function (pi: ExtensionAPI) {
 
 	// ─── Commands ────────────────────────────────────────────────────────────
 
-	pi.registerCommand("zen", {
-		description: "OpenCode Zen free models: list/switch, refresh, or status",
-		getArgumentCompletions: (prefix: string) => {
-			const subs = ["list", "refresh", "status"];
-			const items = subs.map((s) => ({ value: s, label: s }));
-			const filtered = items.filter((i) => i.value.startsWith(prefix));
-			return filtered.length > 0 ? filtered : null;
-		},
-		handler: async (args, ctx) => {
-			const sub = (args || "").trim().toLowerCase();
-
-			if (sub === "status") {
-				const key = getApiKey();
-				const masked = key ? `${key.slice(0, 4)}…${key.slice(-4)}` : "(unset)";
-				ctx.ui.notify(
-					`${PROVIDER_ID}: ${ourModelIds.size} model(s) | key ${masked}`,
-					key ? "info" : "warning",
-				);
-				return;
-			}
-
-			if (sub === "refresh") {
-				try {
-					const count = await refreshAndRegister(pi);
-					ctx.ui.notify(`${PROVIDER_ID}: refreshed, ${count} free model(s)`, "success");
-				} catch (err) {
-					ctx.ui.notify(
-						`${PROVIDER_ID}: refresh failed: ${err instanceof Error ? err.message : String(err)}`,
-						"error",
-					);
-				}
-				return;
-			}
-
-			// default + "list": show a picker of free models and switch on select.
-			let models: ZenModel[] = [];
-			try {
-				models = await fetchModels();
-			} catch {
-				models = FALLBACK_FREE_IDS.map((id) => ({ id }));
-			}
-			if (models.length === 0) {
-				ctx.ui.notify(`${PROVIDER_ID}: no free models available`, "warning");
-				return;
-			}
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					`${PROVIDER_ID}: ${models.map((m) => FREE_MODEL_META[m.id]?.name ?? humanize(m.id)).join(", ")}`,
-					"info",
-				);
-				return;
-			}
-
-			const labels = models.map((m) => FREE_MODEL_META[m.id]?.name ?? humanize(m.id));
-			const choice = await ctx.ui.select("OpenCode Zen free models:", labels);
-			if (choice == null) return;
-			const chosen = models[labels.indexOf(choice)];
-			if (!chosen) return;
-
-			const model = ctx.modelRegistry.find(PROVIDER_ID, chosen.id);
-			if (!model) {
-				ctx.ui.notify(`${PROVIDER_ID}: model ${chosen.id} not registered`, "error");
-				return;
-			}
-			const ok = await pi.setModel(model);
-			if (!ok) {
-				ctx.ui.notify(
-					`${PROVIDER_ID}: no API key set. Run /login ${PROVIDER_ID} or set ZEN_API_KEY`,
-					"error",
-				);
-				return;
-			}
-			ctx.ui.notify(`Switched to ${PROVIDER_ID}/${chosen.id}`, "success");
-		},
-	});
+	// No custom commands: pi already provides /model (pick a model) and /login
+	// (auth). This extension only registers the provider + free models.
 }

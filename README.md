@@ -17,15 +17,11 @@ pi install git:github.com/udit-001/pi-zen
    ```
    Pi stores the key in `~/.pi/agent/auth.json` (user-only permissions).
    No env var needed. (Alternatively, set `ZEN_API_KEY` in your shell.)
-3. Run `/zen` in pi to pick a free model, or `/model pi-zen/big-pickle`.
+3. Open `/model` in pi and pick a `pi-zen/*` model.
 
 ## Commands
 
-| Command | Action |
-| --- | --- |
-| `/zen` | Pick a free model and switch to it |
-| `/zen refresh` | Re-fetch the live model list |
-| `/zen status` | Show model count + API-key state |
+No custom commands. pi's built-ins cover everything: `/model` to pick a model, `/login` to manage keys.
 
 ## Environment variables
 
