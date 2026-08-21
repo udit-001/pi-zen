@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -183,6 +183,25 @@ function writeSnapshot(models: ZenModelConfig[]): void {
 	} catch {
 		// Best-effort persistence.
 	}
+}
+
+/**
+ * Global default model from settings.json — written by pi every time the user
+ * picks a model (/model, Ctrl+P, setModel). Used as the fallback intent when a
+ * session has no model of its own yet (brand-new sessions).
+ */
+function getSettingsDefaultModel(): { provider: string; modelId: string } | null {
+	try {
+		const settings = JSON.parse(
+			readFileSync(join(getAgentDir(), "settings.json"), "utf8"),
+		) as { defaultProvider?: string; defaultModel?: string };
+		if (settings?.defaultProvider && settings?.defaultModel) {
+			return { provider: settings.defaultProvider, modelId: settings.defaultModel };
+		}
+	} catch {
+		// No/unreadable settings — no intent recoverable.
+	}
+	return null;
 }
 
 /** Key stored by `/login pi-zen` in auth.json (pi's official credential store). */
@@ -377,13 +396,16 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]) {
 	// per-process session id — same shape the opencode CLI sends.
 	const projectId = createHash("sha1").update(process.cwd()).digest("hex");
 
-	// apiKey is a reference — pi resolves $ZEN_API_KEY at request time, so models
-	// register (and show in /models) even before the key is set. Requests only
-	// fail (401) once the user actually sends a message without a key.
+	// Pass a concrete key when one exists (stored credential or env). A concrete
+	// value marks the provider "configured" synchronously at registration — which
+	// pi's session-model restore checks immediately after extensions load. The
+	// "$ENV_REF" form only authenticates after an async credential-store refresh
+	// and loses that race, so resume/fork silently drops the pi-zen model. Keep
+	// the $-reference as fallback so models still appear before any key is set.
 	pi.registerProvider(PROVIDER_ID, {
 		name: PROVIDER_NAME,
 		baseUrl: BASE_URL,
-		apiKey: "$ZEN_API_KEY",
+		apiKey: getApiKey() || "$ZEN_API_KEY",
 		authHeader: true,
 		api: "openai-completions",
 		// opencode-CLI headers so Zen serves the free models like it does for opencode.
@@ -404,6 +426,50 @@ async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
 	return models.length;
 }
 
+// ─── Model Restore ───────────────────────────────────────────────────────────
+//
+// pi resolves the session's model (createAgentSession) BEFORE extension
+// factories finish registering providers — our factory awaits network fetches,
+// so registerProvider lands a few ms after the restore block has already run.
+// Any pi-zen model recorded in the session (or as the settings default) is
+// therefore silently dropped in favor of the first authenticated native
+// model. pi already persists everything needed to repair this — the session
+// file records every model_change, and settings.json holds the last pick —
+// so on session_start (post-registration) we simply re-apply the model pi
+// intended. No extra state of our own.
+
+async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	try {
+		// Same resolution rule as pi's getSessionContextSettings: last
+		// model_change / assistant message on the current branch wins. For
+		// brand-new sessions pi seeds the branch with its own (post-fallback)
+		// model choice, so only trust branch history when real messages exist;
+		// otherwise the user's settings default is the intent to honor.
+		const branch = ctx.sessionManager.getBranch();
+		let fromSession: { provider: string; modelId: string } | null = null;
+		if (branch.some((entry) => entry.type === "message")) {
+			for (const entry of branch) {
+				if (entry.type === "model_change") {
+					fromSession = { provider: entry.provider, modelId: entry.modelId };
+				} else if (entry.type === "message" && entry.message.role === "assistant") {
+					const { provider, model } = entry.message;
+					if (provider && model) fromSession = { provider, modelId: model };
+				}
+			}
+		}
+		const intended = fromSession ?? getSettingsDefaultModel();
+		if (!intended || intended.provider !== PROVIDER_ID) return;
+
+		const current = ctx.model;
+		if (current?.provider === PROVIDER_ID && current.id === intended.modelId) return;
+
+		const model = ctx.modelRegistry.find(PROVIDER_ID, intended.modelId);
+		if (model) await pi.setModel(model); // false = no key; next launch retries
+	} catch {
+		// Best-effort repair — never block session startup.
+	}
+}
+
 // ─── Extension Entry ─────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
@@ -418,6 +484,10 @@ export default async function (pi: ExtensionAPI) {
 	// about the API-key state.
 	pi.on("session_start", async (_event, ctx) => {
 		const count = await refreshAndRegister(pi);
+
+		// Re-apply the session's (or default) pi-zen model — pi's own restore ran
+		// before our provider registered. See Model Restore note above.
+		await restoreIntendedModel(pi, ctx);
 
 		if (!ctx.hasUI) return;
 
