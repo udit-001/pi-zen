@@ -427,6 +427,14 @@ async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 // The friendly text must avoid every RETRYABLE marker or a hard quota error
 // becomes an auto-retry loop. It deliberately contains "usage limit", a
 // NON_RETRYABLE marker, as a belt-and-braces guard.
+//
+// Style: follows the Focus output style (styles/Focus.md in output-style) —
+// ASCII only, diagnosis on line 1, numbered one-action recovery steps ranked
+// best first, list cap 5, no re-narrating the diagnosis in prose. Surface
+// layer contract (layers-surface): the message must diagnose (line 1),
+// explain (step 2: the quota resets — not permanent, not the user's fault),
+// and recover (ranked steps). Terms are the extension's ubiquitous language:
+// "usage limit" (opencode's own term), "free model", "Zen", "reset".
 
 const ZEN_QUOTA_ERROR_PATTERN =
 	/FreeUsageLimitError|GoUsageLimitError|insufficient_quota|usage limit|quota/i;
@@ -449,14 +457,12 @@ function zenQuotaFriendlyError(msg: FailedAssistantMessage): string | undefined 
 	if (msg.stopReason !== "error" || msg.provider !== PROVIDER_ID) return undefined;
 	if (!msg.errorMessage || !ZEN_QUOTA_ERROR_PATTERN.test(msg.errorMessage)) return undefined;
 	return [
-		"⚡ Free usage limit reached on Zen.",
+		`Free usage limit hit for "${msg.model}" on Zen.`,
 		"",
-		`The free-tier quota for "${msg.model}" is exhausted.`,
-		"",
-		"To continue:",
-		"  • Switch to another free model: /model",
-		"  • Wait for the quota to reset (varies by model)",
-		"  • Add credits at https://opencode.ai/zen for paid models",
+		"Fix (best first):",
+		"1. /model -> pick another free model",
+		"2. Wait for the reset (timing varies)",
+		"3. Add credits: https://opencode.ai/zen",
 	].join("\n");
 }
 
