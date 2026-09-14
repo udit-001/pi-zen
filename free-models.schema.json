@@ -1,0 +1,115 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"title": "pi-zen free models",
+	"description": "Curated list of free models served by OpenCode Zen. Maintained by GitHub Action, consumed by the pi-zen extension.",
+	"type": "object",
+	"required": ["generatedAt", "source", "count", "models"],
+	"properties": {
+		"generatedAt": {
+			"type": "string",
+			"format": "date-time",
+			"description": "ISO 8601 timestamp of when this file was generated"
+		},
+		"source": {
+			"type": "string",
+			"format": "uri",
+			"description": "URL of the docs page this was scraped from"
+		},
+		"count": {
+			"type": "integer",
+			"description": "Number of models in the list"
+		},
+		"models": {
+			"type": "array",
+			"items": {
+				"$ref": "#/definitions/FreeModelEntry"
+			}
+		}
+	},
+	"additionalProperties": false,
+	"definitions": {
+		"FreeModelEntry": {
+			"type": "object",
+			"required": ["id", "name", "reasoning", "input", "cost", "contextWindow", "maxTokens", "compat"],
+			"properties": {
+				"id": {
+					"type": "string",
+					"description": "Model id as served by Zen (e.g. 'big-pickle', 'deepseek-v4-flash-free')"
+				},
+				"name": {
+					"type": "string",
+					"description": "Human-readable name (e.g. 'Big Pickle', 'DeepSeek V4 Flash Free')"
+				},
+				"reasoning": {
+					"type": "boolean",
+					"description": "Whether the model supports chain-of-thought / reasoning"
+				},
+				"thinkingLevelMap": {
+					"$ref": "#/definitions/ThinkingLevelMap",
+					"description": "Optional map of pi thinking levels to model values (absent = default levels)"
+				},
+				"input": {
+					"type": "array",
+					"items": { "type": "string", "enum": ["text", "image"] },
+					"description": "Supported input modalities"
+				},
+				"cost": {
+					"$ref": "#/definitions/Cost",
+					"description": "Always zeros for free models"
+				},
+				"contextWindow": {
+					"type": "integer",
+					"minimum": 1,
+					"description": "Context window size in tokens"
+				},
+				"maxTokens": {
+					"type": "integer",
+					"minimum": 1,
+					"description": "Max output tokens"
+				},
+				"compat": {
+					"$ref": "#/definitions/Compat",
+					"description": "Provider compatibility flags"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ThinkingLevelMap": {
+			"type": "object",
+			"properties": {
+				"off": { "type": ["string", "null"] },
+				"minimal": { "type": ["string", "null"] },
+				"low": { "type": ["string", "null"] },
+				"medium": { "type": ["string", "null"] },
+				"high": { "type": ["string", "null"] },
+				"xhigh": { "type": ["string", "null"] },
+				"max": { "type": ["string", "null"] }
+			},
+			"additionalProperties": false
+		},
+		"Cost": {
+			"type": "object",
+			"required": ["input", "output", "cacheRead", "cacheWrite"],
+			"properties": {
+				"input": { "type": "number" },
+				"output": { "type": "number" },
+				"cacheRead": { "type": "number" },
+				"cacheWrite": { "type": "number" }
+			},
+			"additionalProperties": false
+		},
+		"Compat": {
+			"type": "object",
+			"required": ["maxTokensField", "supportsStore", "supportsReasoningEffort", "supportsDeveloperRole", "supportsUsageInStreaming"],
+			"properties": {
+				"maxTokensField": { "type": "string", "enum": ["max_tokens", "max_completion_tokens"] },
+				"supportsStore": { "type": "boolean" },
+				"supportsReasoningEffort": { "type": "boolean" },
+				"supportsDeveloperRole": { "type": "boolean" },
+				"supportsUsageInStreaming": { "type": "boolean" },
+				"requiresReasoningContentOnAssistantMessages": { "type": "boolean" }
+			},
+			"additionalProperties": false
+		}
+	}
+}

@@ -3,6 +3,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type {
+	FreeModelEntry,
+	FreeModelsFile,
+	ZenModelConfig,
+} from "./shared.js";
+import {
+	fromFreeModelEntry,
+	humanize,
+	validateFreeModelsFile,
+} from "./shared.js";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 //
@@ -14,34 +24,25 @@ import { join } from "node:path";
 //   https://opencode.ai/zen/v1/chat/completions
 // so we register a single provider with `api: "openai-completions"`.
 //
-// Zen's live /models endpoint returns ids only — no context window, reasoning,
-// or limits. Model metadata is therefore discovered dynamically:
+// Model list & metadata come from a single curated file:
 //
-//   1. Fetch the live free ids from Zen (source of truth for what exists).
-//   2. Join each id against the `opencode` provider entry on models.dev
-//      (https://models.dev/api.json), which the opencode team also maintains —
-//      it is authoritative for how Zen serves each model.
-//   3. Translate to pi's model config using the same rules pi's own
-//      generate-models.ts script applies when it builds its Zen catalog:
-//        - contextWindow/maxTokens  ← limit.context / limit.output (uncapped)
-//        - reasoning                ← reasoning
-//        - thinkingLevelMap         ← reasoning_options effort values map to
-//                                      themselves; "none" → off; levels absent
-//                                      from the values are null (hidden);
-//                                      xhigh is never derived from "max".
-//                                      Toggle / budget_tokens / empty options
-//                                      → no map (pi's default levels).
-//        - image input              ← modalities.input includes "image"
-//        - reasoning replay         ← interleaved.field === "reasoning_content"
-//                                      sets requiresReasoningContentOnAssistantMessages
-//                                      (backends like DeepSeek 400 without it).
-//   4. A free id with no models.dev entry yet (fresh stealth drop) registers
-//      with safe defaults: humanized name, 128k context, 8k output, no
-//      reasoning. Metadata upgrades automatically once models.dev catalogs it.
-//   5. If either fetch fails, fall back to the last-known-good resolution
-//      snapshotted at ~/.pi/agent/cache/pi-zen-models.json — so a model list
-//      you saw yesterday still works offline. First-ever run offline registers
-//      nothing.
+//   free-models.json  (served from the `data` branch via jsdelivr CDN)
+//
+// A GitHub Action (`.github/workflows/update-free-models.yml`) maintains this
+// file by scraping the opencode.ai docs table and cross-referencing models.dev
+// for metadata (context, reasoning, thinking levels, compat flags). The Action
+// runs every 6 hours + on manual dispatch.
+//
+// Resolution flow:
+//   1. Fetch free-models.json from jsdelivr CDN (1 h TTL).
+//   2. Register all listed models — metadata is already baked in.
+//   3. Fallback: if CDN fails, use the last-known-good in-memory set,
+//      then the disk snapshot at ~/.pi/agent/cache/pi-zen-models.json,
+//      then the bundled free-models.snapshot.json.
+//
+// The extension NEVER fetches models.dev at runtime — all metadata lives in
+// the curated JSON. This keeps the extension simple and the knowledge of
+// "which models are actually free" in one auditable, hotfixable file.
 //
 // Get an API key at https://opencode.ai/zen (sign in → billing → copy key), then
 // either run `/login pi-zen` inside pi (stores the key in ~/.pi/agent/auth.json),
@@ -56,19 +57,18 @@ const PROVIDER_NAME = "OpenCode Zen (Free)";
 // handy for testing). MODELS_URL derives from it.
 const BASE_URL = process.env.ZEN_BASE_URL || "https://opencode.ai/zen/v1";
 const MODELS_URL = `${BASE_URL}/models`;
-const MODELS_DEV_URL = "https://models.dev/api.json";
+// Curated free-model list — maintained by the GitHub Action in
+// `.github/workflows/update-free-models.yml`, committed to the `data` branch,
+// served via jsdelivr CDN (1 h cache). Contains full model metadata so the
+// extension never needs to fetch models.dev at runtime.
+const FREE_MODELS_CDN_URL =
+	"https://cdn.jsdelivr.net/gh/udit-001/pi-zen@data/free-models.json";
 
-// Zen's list is tiny and public — refresh it aggressively. models.dev's api.json
-// is a multi-MB payload (we keep only the `opencode` slice) — refresh it rarely.
+// Zen's live list is tiny — refresh aggressively. The curated free-models.json
+// from CDN is a small payload and changes infrequently — cache it for 1 hour.
 const MODEL_CACHE_TTL_MS = 60_000;
-const MODELS_DEV_CACHE_TTL_MS = 300_000;
+const FREE_MODELS_CDN_TTL_MS = 3_600_000;
 const FETCH_TIMEOUT_MS = 8_000;
-const MODELS_DEV_TIMEOUT_MS = 15_000;
-
-// Safe defaults for free models that appear on Zen before models.dev catalogs
-// them. Never used for models with metadata.
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-const DEFAULT_OUTPUT_TOKENS = 8_192;
 
 // Mimic the opencode CLI so Zen serves the free models like it does for opencode.
 // The x-opencode-client / x-opencode-project / x-opencode-session headers are the
@@ -79,51 +79,11 @@ const OPENCODE_USER_AGENT = `opencode/${OPENCODE_CLI_VERSION} ai-sdk/provider-ut
 const OPENCODE_SESSION_ID = `ses_${randomUUID().replace(/-/g, "")}`;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+// FreeModelEntry, FreeModelsFile, ZenModelConfig imported from ./shared.ts.
+// ZenModel is extension-local (the raw { id } from Zen's /models endpoint).
 
 type ZenModel = {
 	id: string;
-};
-
-// models.dev reasoning_options entries (only the kinds we act on).
-type ReasoningOption =
-	| { type: "toggle" }
-	| { type: "effort"; values: string[] }
-	| { type: "budget_tokens"; min?: number; max?: number };
-
-// A model entry under the `opencode` provider on models.dev — the fields we
-// consume. Unknown fields are ignored.
-type ModelsDevModel = {
-	id?: string;
-	name?: string;
-	reasoning?: boolean;
-	reasoning_options?: ReasoningOption[] | null;
-	modalities?: { input?: string[]; output?: string[] } | null;
-	interleaved?: { field?: string } | null;
-	limit?: { context?: number; output?: number };
-	cost?: { input?: number; output?: number };
-};
-
-type ThinkingLevelMap = Partial<
-	Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>
->;
-
-type ZenModelConfig = {
-	id: string;
-	name: string;
-	reasoning: boolean;
-	thinkingLevelMap?: ThinkingLevelMap;
-	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-	contextWindow: number;
-	maxTokens: number;
-	compat: {
-		maxTokensField: "max_tokens" | "max_completion_tokens";
-		supportsStore: boolean;
-		supportsReasoningEffort: boolean;
-		supportsDeveloperRole: boolean;
-		supportsUsageInStreaming: boolean;
-		requiresReasoningContentOnAssistantMessages?: boolean;
-	};
 };
 
 type Snapshot = {
@@ -134,7 +94,7 @@ type Snapshot = {
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let zenCache: { expiresAt: number; models: ZenModel[] } | null = null;
-let devCache: { expiresAt: number; slice: Record<string, ModelsDevModel> } | null = null;
+let freeModelsCache: { expiresAt: number; models: FreeModelEntry[] } | null = null;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
 let hasRegisteredProvider = false;
@@ -155,6 +115,22 @@ function readSnapshot(): ZenModelConfig[] {
 	try {
 		const snap = JSON.parse(readFileSync(getSnapshotPath(), "utf8")) as Snapshot;
 		return Array.isArray(snap?.models) ? snap.models : [];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Read the bundled free-models.snapshot.json that ships with the extension.
+ * Used as the first-ever offline fallback (before any CDN fetch has succeeded
+ * and written a disk snapshot).
+ */
+function readBundledSnapshot(): ZenModelConfig[] {
+	try {
+		// resolve() is relative to the compiled output, not cwd.
+		const snapshotPath = join(import.meta.dirname || ".", "free-models.snapshot.json");
+		const file = JSON.parse(readFileSync(snapshotPath, "utf8")) as FreeModelsFile;
+		return Array.isArray(file?.models) ? file.models.map(fromFreeModelEntry) : [];
 	} catch {
 		return [];
 	}
@@ -226,90 +202,7 @@ function getApiKey(): string {
 	return getStoredKey() || process.env.ZEN_API_KEY || "";
 }
 
-/**
- * A model is free if its id says so (`-free` suffix, or the stealth
- * `big-pickle`), or if its models.dev entry carries zero cost (catches no-suffix
- * free drops once cataloged). A paid or unknown model is never registered —
- * guessing a paid model in as free risks silent billing.
- */
-function isFreeModel(id: string, meta?: ModelsDevModel): boolean {
-	const lower = id.toLowerCase();
-	if (lower === "big-pickle" || lower.endsWith("-free")) return true;
-	return !!meta && meta.cost?.input === 0 && meta.cost?.output === 0;
-}
-
-function humanize(id: string): string {
-	return id
-		.split("-")
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
-}
-
-// ─── Metadata resolution (models.dev → pi model config) ──────────────────────
-
-/**
- * Translate models.dev `reasoning_options` into pi's thinkingLevelMap, using the
- * same rules as pi's generate-models.ts:
- *   - An `effort` option maps its values to themselves; "none" means `off`;
- *     pi levels absent from the values are null (hidden from /model picker);
- *     `xhigh` is only exposed when literally listed (never derived from "max").
- *   - `toggle`, `budget_tokens`, or no options → undefined (pi's default levels,
- *     no map) — thinking is on/off, every standard effort accepted as-is.
- */
-function buildThinkingLevelMap(meta?: ModelsDevModel): ThinkingLevelMap | undefined {
-	const effort = meta?.reasoning_options?.find(
-		(o): o is { type: "effort"; values: string[] } =>
-			o.type === "effort" && Array.isArray(o.values) && o.values.length > 0,
-	);
-	if (!effort) return undefined;
-	const values = new Set(effort.values);
-	const map: ThinkingLevelMap = {
-		off: values.has("none") ? "none" : null,
-	};
-	for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
-		map[level] = values.has(level) ? level : null;
-	}
-	return map;
-}
-
-/**
- * Backends with interleaved reasoning (DeepSeek/GLM-style `reasoning_content`)
- * reject multi-turn requests that drop the prior assistant turn's reasoning.
- * models.dev's `interleaved.field` marks them.
- */
-function needsReasoningReplay(meta?: ModelsDevModel): boolean {
-	return meta?.interleaved?.field === "reasoning_content";
-}
-
-function toModelConfig(m: ZenModel, meta?: ModelsDevModel): ZenModelConfig {
-	const reasoning = meta?.reasoning === true;
-	const context = meta?.limit?.context;
-	const output = meta?.limit?.output;
-	const hasImage = Array.isArray(meta?.modalities?.input) && meta.modalities.input.includes("image");
-	return {
-		id: m.id,
-		name: meta?.name || humanize(m.id),
-		reasoning,
-		thinkingLevelMap: buildThinkingLevelMap(meta),
-		input: hasImage ? ["text", "image"] : ["text"],
-		// Free models are zero-cost by construction (see isFreeModel).
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: typeof context === "number" && context > 0 ? context : DEFAULT_CONTEXT_WINDOW,
-		maxTokens: typeof output === "number" && output > 0 ? output : DEFAULT_OUTPUT_TOKENS,
-		compat: {
-			// OpenAI-compatible gateways expect `max_tokens` and `system` role.
-			maxTokensField: "max_tokens",
-			supportsStore: false,
-			// Only emit reasoning_effort for models that support thinking.
-			supportsReasoningEffort: reasoning,
-			supportsDeveloperRole: false,
-			supportsUsageInStreaming: false,
-			...(reasoning && needsReasoningReplay(meta)
-				? { requiresReasoningContentOnAssistantMessages: true }
-				: {}),
-		},
-	};
-}
+// humanize() and fromFreeModelEntry() imported from ./shared.ts.
 
 // ─── Fetchers (TTL-cached) ───────────────────────────────────────────────────
 
@@ -331,38 +224,49 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
 	return models;
 }
 
-/** The `opencode` provider slice of models.dev — authoritative Zen metadata. */
-async function fetchModelsDev(force = false): Promise<Record<string, ModelsDevModel>> {
-	if (!force && devCache && devCache.expiresAt > Date.now()) {
-		return devCache.slice;
+/**
+ * Curated free-model list from the data branch (maintained by GitHub Action).
+ * Contains full model metadata — no runtime models.dev join required.
+ * jsdelivr caches for ~1 hour; we mirror that TTL locally.
+ */
+async function fetchFreeModelsList(force = false): Promise<FreeModelEntry[]> {
+	if (!force && freeModelsCache && freeModelsCache.expiresAt > Date.now()) {
+		return freeModelsCache.models;
 	}
-	const res = await fetch(MODELS_DEV_URL, {
+	const res = await fetch(FREE_MODELS_CDN_URL, {
 		headers: { Accept: "application/json" },
-		signal: AbortSignal.timeout(MODELS_DEV_TIMEOUT_MS),
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
 	if (!res.ok) {
 		throw new Error(`HTTP ${res.status} ${res.statusText}`);
 	}
-	const json = (await res.json()) as Record<string, { models?: Record<string, ModelsDevModel> }>;
-	const slice = json?.opencode?.models ?? {};
-	devCache = { expiresAt: Date.now() + MODELS_DEV_CACHE_TTL_MS, slice };
-	return slice;
+	const data = await res.json();
+	if (!validateFreeModelsFile(data)) {
+		throw new Error("Curated free-models.json failed validation — data may be corrupted or schema drifted");
+	}
+	freeModelsCache = { expiresAt: Date.now() + FREE_MODELS_CDN_TTL_MS, models: data.models };
+	return data.models;
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
 
 /**
- * Resolve the free-model config set: live Zen ids ⨝ models.dev metadata.
- * Refreshes each source only when its TTL has expired. Throws on fetch failure
- * (caller recovers). A successful resolve becomes the new last-known-good.
+ * Resolve the free-model config set.
+ *
+ * Primary path: fetch the curated list from the data branch via jsdelivr CDN.
+ * The JSON already contains full model metadata — no models.dev join needed.
+ *
+ * Fallback path: if CDN is unreachable, fall back to the last-known-good
+ * in-memory set, then the disk snapshot (shipped with the extension).
+ *
+ * A successful primary resolve becomes the new last-known-good.
  */
 async function resolveModels(): Promise<ZenModelConfig[]> {
-	const [zenModels, devSlice] = await Promise.all([fetchZenModels(), fetchModelsDev()]);
-	const configs = zenModels
-		.map((m) => ({ m, meta: devSlice[m.id] }))
-		.filter(({ m, meta }) => isFreeModel(m.id, meta))
-		.map(({ m, meta }) => toModelConfig(m, meta));
-
+	const curated = await fetchFreeModelsList();
+	if (curated.length === 0) {
+		throw new Error("Curated free-models list is empty");
+	}
+	const configs = curated.map(fromFreeModelEntry);
 	lastGood = configs;
 	writeSnapshot(configs);
 	return configs;
@@ -370,7 +274,8 @@ async function resolveModels(): Promise<ZenModelConfig[]> {
 
 /**
  * The module's interface: never throws. Falls back to the last fully-resolved
- * set (in-memory, else the disk snapshot), else an empty list.
+ * set (in-memory, else the disk snapshot, else the bundled snapshot),
+ * else an empty list.
  */
 async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 	try {
@@ -382,6 +287,11 @@ async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 	}
 	if (!lastGood) {
 		lastGood = readSnapshot();
+	}
+	// First-ever run offline: the disk snapshot is empty. Try the bundled
+	// free-models.snapshot.json that ships with the extension.
+	if (lastGood.length === 0) {
+		lastGood = readBundledSnapshot();
 	}
 	return lastGood;
 }
@@ -479,9 +389,22 @@ export default async function (pi: ExtensionAPI) {
 
 	// ─── Events ──────────────────────────────────────────────────────────────
 
+	// Background refresh every 6 hours (stale-while-revalidate).
+	setInterval(() => {
+		fetchFreeModelsList(true)
+			.then((curated) => {
+				if (curated.length > 0) {
+					const configs = curated.map(fromFreeModelEntry);
+					registerProvider(pi, configs);
+				}
+			})
+			.catch(() => {
+				// Silent — next session_start will retry.
+			});
+	}, FREE_MODELS_CDN_TTL_MS * 2);
+
 	// Re-register on session_start (reload/new/fork) with a refreshed model list
-	// (stale sources only — Zen 60s TTL, models.dev 5min TTL) and UI feedback
-	// about the API-key state.
+	// (CDN 1 h TTL) and UI feedback about the API-key state.
 	pi.on("session_start", async (_event, ctx) => {
 		const count = await refreshAndRegister(pi);
 
@@ -501,18 +424,58 @@ export default async function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Strip OpenAI-only cache fields the Zen gateway may reject. Scoped to our
-	// models only — never modify payloads for other providers (e.g. closedrouter).
+	// ─── Request lifecycle ──────────────────────────────────────────────────────
+	//
+	// Consolidated state for the request → response → message lifecycle.
+	// Tracks which provider owns the in-flight request so post-processing
+	// (cache stripping, error rewriting) stays scoped to pi-zen models only.
+
+	const requestState = {
+		provider: "", // which provider owns the current request
+		zen429: false, // did the last response from our provider 429?
+	};
+
 	pi.on("before_provider_request", (event) => {
 		const payload = event?.payload;
 		if (!payload || typeof payload !== "object") return;
 		const obj = payload as Record<string, unknown>;
 		const modelId = typeof obj.model === "string" ? obj.model : "";
-		if (!ourModelIds.has(modelId)) return;
+		requestState.provider = ourModelIds.has(modelId) ? PROVIDER_ID : "";
 
+		// Strip OpenAI-only cache fields the Zen gateway may reject.
 		delete obj.prompt_cache_key;
 		delete obj.prompt_cache_retention;
 		return obj;
+	});
+
+	pi.on("after_provider_response", (event) => {
+		requestState.zen429 = requestState.provider === PROVIDER_ID && event.status === 429;
+	});
+
+	// ─── Error UX ─────────────────────────────────────────────────────────────
+	//
+	// Zen's free models return 429 with { type: "FreeUsageLimitError", ... }
+	// when the free-tier quota is exhausted. Pi formats this as a raw JSON blob.
+	// We rewrite it into an actionable message (diagnose → explain → recover),
+	// matching opencode's own UX: "Free usage exceeded, subscribe to Go".
+
+	pi.on("message_end", (event) => {
+		if (!requestState.zen429) return;
+		requestState.zen429 = false;
+
+		const msg = event.message;
+		if (msg.role !== "assistant" || !msg.errorMessage) return;
+
+		msg.errorMessage = [
+			"⚡ Free usage limit reached on Zen.",
+			"",
+			"Your free-tier quota for this model is exhausted.",
+			"",
+			"To continue:",
+			"  • Switch to another free model: /model",
+			"  • Wait for the quota to reset (varies by model)",
+			"  • Add credits at https://opencode.ai/zen for paid models",
+		].join("\n");
 	});
 
 	// ─── Commands ────────────────────────────────────────────────────────────

@@ -1,3 +1,6 @@
 node_modules/
 .pi/
 *.log
+# Live free-models.json is on the `data` branch, fetched via jsdelivr at runtime.
+# The snapshot below ships with the extension for offline fallback.
+# free-models.json
