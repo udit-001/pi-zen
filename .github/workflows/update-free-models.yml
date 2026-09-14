@@ -23,14 +23,14 @@ jobs:
 
       - name: Fetch overrides from data branch
         run: |
-          # Try to get overrides.yml from the data branch
+          # Try to get overrides.yml from the data branch. Reads it straight
+          # from the fetched ref — this step never leaves the current branch.
           if git fetch origin data:data 2>/dev/null; then
             git show data:overrides.yml > "$RUNNER_TEMP/overrides.yml" 2>/dev/null || true
             echo "✅ Loaded overrides from data branch"
           else
             echo "ℹ️  No data branch yet — skipping overrides"
           fi
-          git checkout -
 
       - name: Build free-models.json
         run: |
