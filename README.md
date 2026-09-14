@@ -18,7 +18,6 @@ No extra commands — pi's `/model` and `/login` do everything.
 
 - **No premature compaction** — pi sizes sessions to the model's real context window.
 - **A thinking picker that tells the truth** — low/high/max appear only when the model accepts them.
-- **Screenshots work** — paste images only to the models that can see them.
 - **Free means free** — only models on Zen's free tier enter the picker.
 - **Self-updating** — the model list refreshes itself; updates land without reinstalling.
 
