@@ -100,8 +100,6 @@ let freeModelsCache: { expiresAt: number; models: FreeModelEntry[] } | null = nu
 let lastGood: ZenModelConfig[] | null = null;
 /** CDN-provided default model id (from free-models.json `defaultModel` field). */
 let cdnDefaultModel: string | null = null;
-let hasRegisteredProvider = false;
-let ourModelIds = new Set<string>();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -303,9 +301,6 @@ async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 // ─── Provider Registration ───────────────────────────────────────────────────
 
 function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]) {
-	hasRegisteredProvider = true;
-	ourModelIds = new Set(models.map((m) => m.id));
-
 	// Stable per-project id (sha1 of cwd) so Zen groups usage by project, and a
 	// per-process session id — same shape the opencode CLI sends.
 	const projectId = createHash("sha1").update(process.cwd()).digest("hex");
@@ -414,6 +409,57 @@ async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 	}
 }
 
+// ─── Error UX ───────────────────────────────────────────────────────────────
+//
+// Zen's free models return 429 with { type: "FreeUsageLimitError", ... }
+// when the free-tier quota is exhausted, and pi surfaces the raw JSON blob.
+//
+// Why detection happens on the message, not in after_provider_response: the
+// OpenAI SDK throws APIError on non-2xx responses before pi-ai's onResponse
+// hook runs, so that event never fires for 429s — any status flag set there
+// stays false and the rewrite is skipped. Failed assistant messages keep
+// their provider/model and carry the raw `429: {"type":...}` errorMessage,
+// making the finalized message itself the reliable signal.
+//
+// Wording constraint: pi re-classifies the final message via
+// isRetryableAssistantError (NON_RETRYABLE patterns first, then RETRYABLE:
+// "429", "rate limit", "too many requests", "try ... again", "timeout", ...).
+// The friendly text must avoid every RETRYABLE marker or a hard quota error
+// becomes an auto-retry loop. It deliberately contains "usage limit", a
+// NON_RETRYABLE marker, as a belt-and-braces guard.
+
+const ZEN_QUOTA_ERROR_PATTERN =
+	/FreeUsageLimitError|GoUsageLimitError|insufficient_quota|usage limit|quota/i;
+
+/** Fields of a failed assistant message the quota-error decision reads. */
+type FailedAssistantMessage = {
+	provider: string;
+	model: string;
+	stopReason: string;
+	errorMessage?: string;
+};
+
+/**
+ * Friendly replacement text for a Zen quota-exhausted error, or undefined
+ * when the message isn't one (including transient 429 throttles, which pi's
+ * own retry policy should keep handling). Pure — decision + wording only; the
+ * message_end handler owns all event plumbing.
+ */
+function zenQuotaFriendlyError(msg: FailedAssistantMessage): string | undefined {
+	if (msg.stopReason !== "error" || msg.provider !== PROVIDER_ID) return undefined;
+	if (!msg.errorMessage || !ZEN_QUOTA_ERROR_PATTERN.test(msg.errorMessage)) return undefined;
+	return [
+		"⚡ Free usage limit reached on Zen.",
+		"",
+		`The free-tier quota for "${msg.model}" is exhausted.`,
+		"",
+		"To continue:",
+		"  • Switch to another free model: /model",
+		"  • Wait for the quota to reset (varies by model)",
+		"  • Add credits at https://opencode.ai/zen for paid models",
+	].join("\n");
+}
+
 // ─── Extension Entry ─────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
@@ -459,57 +505,28 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// ─── Request lifecycle ──────────────────────────────────────────────────────
-	//
-	// Consolidated state for the request → response → message lifecycle.
-	// Tracks which provider owns the in-flight request so post-processing
-	// (cache stripping, error rewriting) stays scoped to pi-zen models only.
 
-	const requestState = {
-		provider: "", // which provider owns the current request
-		zen429: false, // did the last response from our provider 429?
-	};
-
+	// Strip OpenAI-only cache fields the Zen gateway may reject.
 	pi.on("before_provider_request", (event) => {
 		const payload = event?.payload;
 		if (!payload || typeof payload !== "object") return;
 		const obj = payload as Record<string, unknown>;
-		const modelId = typeof obj.model === "string" ? obj.model : "";
-		requestState.provider = ourModelIds.has(modelId) ? PROVIDER_ID : "";
-
-		// Strip OpenAI-only cache fields the Zen gateway may reject.
 		delete obj.prompt_cache_key;
 		delete obj.prompt_cache_retention;
 		return obj;
 	});
 
-	pi.on("after_provider_response", (event) => {
-		requestState.zen429 = requestState.provider === PROVIDER_ID && event.status === 429;
-	});
-
-	// ─── Error UX ─────────────────────────────────────────────────────────────
-	//
-	// Zen's free models return 429 with { type: "FreeUsageLimitError", ... }
-	// when the free-tier quota is exhausted. Pi formats this as a raw JSON blob.
-	// We rewrite it into an actionable message (diagnose → explain → recover),
-	// matching opencode's own UX: "Free usage exceeded, subscribe to Go".
-
+	// Rewrite raw Zen quota errors into actionable guidance. Detection and
+	// wording live in zenQuotaFriendlyError (see Error UX above); this handler
+	// is plumbing only: narrow the message, ask, return the replacement per the
+	// message_end contract (the runner chains returned messages and
+	// agent-session swaps them in place before persistence and display).
 	pi.on("message_end", (event) => {
-		if (!requestState.zen429) return;
-		requestState.zen429 = false;
-
 		const msg = event.message;
-		if (msg.role !== "assistant" || !msg.errorMessage) return;
-
-		msg.errorMessage = [
-			"⚡ Free usage limit reached on Zen.",
-			"",
-			"Your free-tier quota for this model is exhausted.",
-			"",
-			"To continue:",
-			"  • Switch to another free model: /model",
-			"  • Wait for the quota to reset (varies by model)",
-			"  • Add credits at https://opencode.ai/zen for paid models",
-		].join("\n");
+		if (msg.role !== "assistant") return;
+		const friendly = zenQuotaFriendlyError(msg);
+		if (!friendly) return;
+		return { message: { ...msg, errorMessage: friendly } };
 	});
 
 	// ─── Commands ────────────────────────────────────────────────────────────
