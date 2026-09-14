@@ -31,25 +31,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Fetch or create the data branch
-          git fetch origin data:data 2>/dev/null || git branch data --orphan
+          # Fetch the data branch if it exists, otherwise create an orphan.
+          if git fetch origin data:data; then
+            git checkout data
+          else
+            git checkout --orphan data
+            git rm -rf . 2>/dev/null || true
+          fi
 
-          # Switch to data branch with only the JSON file
-          git checkout data
-
-          # Remove old files (in case the branch had them)
-          git rm -rf . 2>/dev/null || true
-
-          # Copy the new JSON
+          # Replace contents with just the new JSON
           cp "$RUNNER_TEMP/free-models.json" .
+          git add free-models.json
 
-          # Only commit if something changed
-          if git diff --quiet && git diff --cached --quiet; then
+          # Only commit if something actually changed
+          if git diff --cached --quiet; then
             echo "No changes — skipping commit"
             exit 0
           fi
 
-          git add free-models.json
           git commit -m "chore: update free-models.json [skip ci]
 
           Generated from opencode.ai/docs/zen + models.dev
