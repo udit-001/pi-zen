@@ -88,6 +88,7 @@ type ZenModel = {
 
 type Snapshot = {
 	savedAt: number;
+	defaultModel?: string;
 	models: ZenModelConfig[];
 };
 
@@ -97,6 +98,8 @@ let zenCache: { expiresAt: number; models: ZenModel[] } | null = null;
 let freeModelsCache: { expiresAt: number; models: FreeModelEntry[] } | null = null;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
+/** CDN-provided default model id (from free-models.json `defaultModel` field). */
+let cdnDefaultModel: string | null = null;
 let hasRegisteredProvider = false;
 let ourModelIds = new Set<string>();
 
@@ -136,11 +139,11 @@ function readBundledSnapshot(): ZenModelConfig[] {
 	}
 }
 
-function writeSnapshot(models: ZenModelConfig[]): void {
+function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
 	try {
 		const dir = join(getAgentDir(), "cache");
 		mkdirSync(dir, { recursive: true });
-		const payload = JSON.stringify({ savedAt: Date.now(), models } satisfies Snapshot);
+		const payload = JSON.stringify({ savedAt: Date.now(), defaultModel, models } satisfies Snapshot);
 		// Write-then-rename keeps readers off partial files on POSIX. On Windows,
 		// renaming over an existing destination can transiently fail with EPERM
 		// (antivirus / a concurrent pi holding it) — fall back to a direct write,
@@ -229,9 +232,9 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
  * Contains full model metadata — no runtime models.dev join required.
  * jsdelivr caches for ~1 hour; we mirror that TTL locally.
  */
-async function fetchFreeModelsList(force = false): Promise<FreeModelEntry[]> {
+async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEntry[]; defaultModel?: string }> {
 	if (!force && freeModelsCache && freeModelsCache.expiresAt > Date.now()) {
-		return freeModelsCache.models;
+		return { models: freeModelsCache.models, defaultModel: cdnDefaultModel ?? undefined };
 	}
 	const res = await fetch(FREE_MODELS_CDN_URL, {
 		headers: { Accept: "application/json" },
@@ -245,7 +248,8 @@ async function fetchFreeModelsList(force = false): Promise<FreeModelEntry[]> {
 		throw new Error("Curated free-models.json failed validation — data may be corrupted or schema drifted");
 	}
 	freeModelsCache = { expiresAt: Date.now() + FREE_MODELS_CDN_TTL_MS, models: data.models };
-	return data.models;
+	cdnDefaultModel = typeof data.defaultModel === "string" ? data.defaultModel : null;
+	return { models: data.models, defaultModel: cdnDefaultModel ?? undefined };
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
@@ -262,13 +266,13 @@ async function fetchFreeModelsList(force = false): Promise<FreeModelEntry[]> {
  * A successful primary resolve becomes the new last-known-good.
  */
 async function resolveModels(): Promise<ZenModelConfig[]> {
-	const curated = await fetchFreeModelsList();
+	const { models: curated, defaultModel } = await fetchFreeModelsList();
 	if (curated.length === 0) {
 		throw new Error("Curated free-models list is empty");
 	}
 	const configs = curated.map(fromFreeModelEntry);
 	lastGood = configs;
-	writeSnapshot(configs);
+	writeSnapshot(configs, defaultModel);
 	return configs;
 }
 
@@ -348,6 +352,21 @@ async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
 // so on session_start (post-registration) we simply re-apply the model pi
 // intended. No extra state of our own.
 
+/**
+ * Update the settings.json with the new default model.
+ */
+function updateSettingsDefaultModel(modelId: string): void {
+	try {
+		const settingsPath = join(getAgentDir(), "settings.json");
+		const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+		settings.defaultProvider = PROVIDER_ID;
+		settings.defaultModel = modelId;
+		writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+	} catch {
+		// Best-effort — don't block if settings write fails
+	}
+}
+
 async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	try {
 		// Same resolution rule as pi's getSessionContextSettings: last
@@ -373,8 +392,23 @@ async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 		const current = ctx.model;
 		if (current?.provider === PROVIDER_ID && current.id === intended.modelId) return;
 
-		const model = ctx.modelRegistry.find(PROVIDER_ID, intended.modelId);
-		if (model) await pi.setModel(model); // false = no key; next launch retries
+		let model = ctx.modelRegistry.find(PROVIDER_ID, intended.modelId);
+
+		// If the intended model isn't available, fall back to the CDN-provided default
+		if (!model) {
+			const fallback = cdnDefaultModel || "big-pickle";
+			if (intended.modelId !== fallback) {
+				model = ctx.modelRegistry.find(PROVIDER_ID, fallback);
+				if (model) {
+					console.log(
+						`${PROVIDER_ID}: Model "${intended.modelId}" not available, falling back to "${fallback}"`,
+					);
+					updateSettingsDefaultModel(fallback);
+				}
+			}
+		}
+
+		if (model) await pi.setModel(model);
 	} catch {
 		// Best-effort repair — never block session startup.
 	}
@@ -392,7 +426,7 @@ export default async function (pi: ExtensionAPI) {
 	// Background refresh every 6 hours (stale-while-revalidate).
 	setInterval(() => {
 		fetchFreeModelsList(true)
-			.then((curated) => {
+			.then(({ models: curated }) => {
 				if (curated.length > 0) {
 					const configs = curated.map(fromFreeModelEntry);
 					registerProvider(pi, configs);

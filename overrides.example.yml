@@ -1,0 +1,10 @@
+# pi-zen overrides
+# Edit this file on GitHub (mobile-friendly YAML)
+# Action merges these into free-models.json
+
+# Pick the default model for first-time users and fallback
+defaultModel: big-pickle
+
+# Models that keep returning errors (one per line)
+disabledModels:
+  - muse-spark-1.3-contributor-free

@@ -6,15 +6,16 @@
  * enriches them with metadata from models.dev, and writes free-models.json.
  *
  * Usage:
- *   node scripts/build-free-models.mjs                    # write to ./free-models.json
- *   node scripts/build-free-models.mjs --out path/to/out  # write to custom path
- *   node scripts/build-free-models.mjs --dry-run          # print to stdout only
- *   node scripts/build-free-models.mjs --pretty           # pretty-print JSON
+ *   node scripts/build-free-models.mjs                            # write to ./free-models.json
+ *   node scripts/build-free-models.mjs --out path/to/out          # write to custom path
+ *   node scripts/build-free-models.mjs --overrides overrides.yml  # apply hand-curated overrides
+ *   node scripts/build-free-models.mjs --dry-run                  # print to stdout only
+ *   node scripts/build-free-models.mjs --pretty                   # pretty-print JSON
  *
  * Can be run locally or in GitHub Actions. No dependencies beyond Node 18+.
  */
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -22,7 +23,6 @@ import { join } from "node:path";
 const DOCS_URL = "https://opencode.ai/docs/zen";
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const FETCH_TIMEOUT_MS = 15_000;
-const SOURCE_REPO = "udit-001/pi-zen"; // for the "updatedFrom" field
 
 // ─── Args ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,64 @@ const dryRun = args.includes("--dry-run");
 const pretty = args.includes("--pretty");
 const outIdx = args.indexOf("--out");
 const outDir = outIdx !== -1 ? args[outIdx + 1] : ".";
+const overridesIdx = args.indexOf("--overrides");
+const overridesPath = overridesIdx !== -1 ? args[overridesIdx + 1] : null;
+
+// ─── YAML Parser (minimal) ───────────────────────────────────────────────────
+//
+// Just enough to parse overrides.yml:
+//   key: value
+//   key:
+//     - item1
+//     - item2
+
+function parseSimpleYaml(text) {
+	const result = {};
+	let currentKey = null;
+
+	for (const rawLine of text.split("\n")) {
+		const line = rawLine.replace(/#.*$/, "").trim(); // strip comments
+		if (!line) continue;
+
+		// List item: "  - value" (indented with dash)
+		const listMatch = line.match(/^\s*-\s+(.+)$/);
+		if (listMatch && currentKey) {
+			if (!Array.isArray(result[currentKey])) result[currentKey] = [];
+			result[currentKey].push(listMatch[1].trim());
+			continue;
+		}
+
+		// Key-value: "key: value" or "key:" (start of list)
+		const kvMatch = line.match(/^(\w+):\s*(.*)$/);
+		if (kvMatch) {
+			currentKey = kvMatch[1];
+			const value = kvMatch[2].trim();
+			if (value) {
+				result[currentKey] = value;
+			}
+			continue;
+		}
+	}
+
+	return result;
+}
+
+function loadOverrides(path) {
+	if (!path || !existsSync(path)) {
+		return { disabledModels: [] };
+	}
+	try {
+		const raw = readFileSync(path, "utf8");
+		const parsed = parseSimpleYaml(raw);
+		return {
+			defaultModel: typeof parsed.defaultModel === "string" ? parsed.defaultModel : undefined,
+			disabledModels: Array.isArray(parsed.disabledModels) ? parsed.disabledModels : [],
+		};
+	} catch (err) {
+		console.error(`⚠️  Failed to load overrides: ${err.message}`);
+		return { disabledModels: [] };
+	}
+}
 
 // ─── Fetch helpers ───────────────────────────────────────────────────────────
 
@@ -54,21 +112,9 @@ async function fetchJSON(url) {
 
 // ─── Step 1: Parse the docs table ────────────────────────────────────────────
 
-/**
- * Parse the Zen docs page for the model table. The page is HTML with a
- * markdown-like table. We extract rows by regex rather than importing an
- * HTML parser — the table format is stable and maintained by opencode.
- *
- * Returns: Array<{ name: string, id: string, endpoint: string, sdk: string }>
- */
 function parseDocsTable(html) {
 	const models = [];
 
-	// The docs page renders a markdown table. In the raw HTML, each row is
-	// <tr><td>Model</td><td>model-id</td><td>endpoint</td><td>sdk</td></tr>
-	// We match both HTML table rows and markdown table rows.
-
-	// Try HTML table rows first
 	const htmlRowRegex = /<tr>\s*<td[^>]*>(.*?)<\/td>\s*<td[^>]*>(.*?)<\/td>\s*<td[^>]*>(.*?)<\/td>\s*<td[^>]*>(.*?)<\/td>\s*<\/tr>/gs;
 	let match;
 	while ((match = htmlRowRegex.exec(html)) !== null) {
@@ -81,7 +127,6 @@ function parseDocsTable(html) {
 		}
 	}
 
-	// If no HTML rows found, try markdown table rows
 	if (models.length === 0) {
 		const mdRowRegex = /^\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|$/gm;
 		while ((match = mdRowRegex.exec(html)) !== null) {
@@ -104,27 +149,10 @@ function stripTags(html) {
 
 // ─── Step 2: Identify free models ────────────────────────────────────────────
 
-/**
- * Determine if a model is free based on the docs table entry.
- *
- * Free models on Zen are identified by:
- *   1. The `-free` suffix on the model id (e.g., `deepseek-v4-flash-free`)
- *   2. The `big-pickle` stealth id
- *   3. Using the `/v1/chat/completions` endpoint (OpenAI-compatible)
- *
- * We use the same heuristic as the extension's `isFreeModel` but on the
- * curated docs table — which is a strict subset of the `/models` endpoint.
- */
 function isFreeModel(id, endpoint) {
 	const lower = id.toLowerCase();
 	if (lower === "big-pickle" || lower.endsWith("-free")) return true;
-	// Also include chat/completions models without -free suffix if they
-	// appear to be free-tier (e.g., future stealth drops). The docs table
-	// only lists models opencode actually serves, so if it's in the table
-	// and uses chat/completions, it's worth considering.
 	if (endpoint?.includes("/chat/completions") && !lower.endsWith("-free") && lower !== "big-pickle") {
-		// Not clearly free — skip unless it's in a known free list.
-		// This catches paid chat/completions models if opencode adds any.
 		return false;
 	}
 	return false;
@@ -132,10 +160,6 @@ function isFreeModel(id, endpoint) {
 
 // ─── Step 3: Enrich with models.dev metadata ─────────────────────────────────
 
-/**
- * Cross-reference free model ids with models.dev `opencode` provider metadata.
- * Returns enriched configs matching pi's model format.
- */
 function enrichWithMetadata(freeIds, devSlice) {
 	const models = [];
 
@@ -197,9 +221,55 @@ function needsReasoningReplay(meta) {
 	return meta?.interleaved?.field === "reasoning_content";
 }
 
+// ─── Default model selection ─────────────────────────────────────────────────
+
+/**
+ * Compute the recommended default model.
+ *
+ * Criteria (weighted):
+ *   +10  reasoning capable
+ *   +5   vision (image input)
+ *   +N   context window (N = contextWindow / 100_000, capped at 10)
+ *   -1   requires reasoning replay (quirky backends)
+ *
+ * big-pickle is always eligible as a stable alias.
+ * Tie-broken by model id alphabetically for determinism.
+ */
+function pickDefaultModel(models) {
+	if (models.length === 0) return null;
+
+	let best = null;
+	let bestScore = -Infinity;
+
+	for (const m of models) {
+		let score = 0;
+		score += m.reasoning ? 10 : 0;
+		score += m.input.includes("image") ? 5 : 0;
+		score += Math.min(m.contextWindow / 100_000, 10);
+		score += m.compat?.requiresReasoningContentOnAssistantMessages ? -1 : 0;
+
+		// Deterministic tie-break
+		if (score > bestScore || (score === bestScore && m.id < best.id)) {
+			best = m;
+			bestScore = score;
+		}
+	}
+
+	return best?.id ?? null;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
+	// Load overrides
+	const overrides = loadOverrides(overridesPath);
+	if (overrides.defaultModel) {
+		console.error(`📋 Overrides: defaultModel=${overrides.defaultModel}`);
+	}
+	if (overrides.disabledModels.length > 0) {
+		console.error(`📋 Overrides: disabled=${overrides.disabledModels.join(", ")}`);
+	}
+
 	console.error("⏳ Fetching opencode.ai docs...");
 	const docsHtml = await fetchText(DOCS_URL);
 	const allModels = parseDocsTable(docsHtml);
@@ -228,12 +298,26 @@ async function main() {
 	}
 
 	// Build the output
-	const enriched = enrichWithMetadata(freeModels, devSlice);
+	let enriched = enrichWithMetadata(freeModels, devSlice);
+
+	// Apply disabled models from overrides
+	if (overrides.disabledModels.length > 0) {
+		const disabledSet = new Set(overrides.disabledModels);
+		const before = enriched.length;
+		enriched = enriched.filter((m) => !disabledSet.has(m.id));
+		console.error(`🚫 Disabled ${before - enriched.length} model(s)`);
+	}
+
+	// Resolve defaultModel: overrides > auto-compute
+	const defaultModel = overrides.defaultModel || pickDefaultModel(enriched);
+	console.error(`🎯 Default model: ${defaultModel}`);
+
 	const output = {
 		$schema: "./free-models.schema.json",
 		generatedAt: new Date().toISOString(),
 		source: DOCS_URL,
 		count: enriched.length,
+		defaultModel,
 		models: enriched,
 	};
 

@@ -21,8 +21,24 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Fetch overrides from data branch
+        run: |
+          # Try to get overrides.yml from the data branch
+          if git fetch origin data:data 2>/dev/null; then
+            git show data:overrides.yml > "$RUNNER_TEMP/overrides.yml" 2>/dev/null || true
+            echo "✅ Loaded overrides from data branch"
+          else
+            echo "ℹ️  No data branch yet — skipping overrides"
+          fi
+          git checkout -
+
       - name: Build free-models.json
-        run: node scripts/build-free-models.mjs --out "$RUNNER_TEMP" --pretty
+        run: |
+          OVERRIDES_FLAG=""
+          if [ -f "$RUNNER_TEMP/overrides.yml" ]; then
+            OVERRIDES_FLAG="--overrides $RUNNER_TEMP/overrides.yml"
+          fi
+          node scripts/build-free-models.mjs --out "$RUNNER_TEMP" --pretty $OVERRIDES_FLAG
 
       - name: Commit to data branch
         env:

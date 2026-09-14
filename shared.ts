@@ -61,6 +61,7 @@ export type FreeModelsFile = {
 	generatedAt: string;
 	source: string;
 	count: number;
+	defaultModel?: string;
 	models: FreeModelEntry[];
 };
 

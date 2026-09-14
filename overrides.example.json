@@ -1,0 +1,8 @@
+{
+	"$schema": "./free-models.schema.json",
+	"_comment": "Hand-curated overrides. Action merges this into the built free-models.json",
+	"defaultModel": "big-pickle",
+	"disabledModels": [
+		"muse-spark-1.3-contributor-free"
+	]
+}

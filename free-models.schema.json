@@ -3,7 +3,7 @@
 	"title": "pi-zen free models",
 	"description": "Curated list of free models served by OpenCode Zen. Maintained by GitHub Action, consumed by the pi-zen extension.",
 	"type": "object",
-	"required": ["generatedAt", "source", "count", "models"],
+	"required": ["generatedAt", "source", "count", "defaultModel", "models"],
 	"properties": {
 		"generatedAt": {
 			"type": "string",
@@ -18,6 +18,10 @@
 		"count": {
 			"type": "integer",
 			"description": "Number of models in the list"
+		},
+		"defaultModel": {
+			"type": "string",
+			"description": "Recommended default model id for first-time users and fallback"
 		},
 		"models": {
 			"type": "array",
