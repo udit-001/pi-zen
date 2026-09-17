@@ -30,7 +30,6 @@ export const MODEL_APIS: ReadonlySet<string> = new Set<ModelApi>([
 	"google-generative-ai",
 ]);
 
-
 /** Pi's thinking-level map: maps level names to model-specific values or null (hidden). */
 export type ThinkingLevelMap = Partial<
 	Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>
@@ -395,10 +394,13 @@ const ZEN_FREE_TIER_PLACEHOLDER_TOOL_ANTHROPIC = {
  * `api` picks the tool wrapper for the payload's endpoint family; callers
  * resolve it from the request's model id (the before_provider_request event
  * carries no headers). `google-generative-ai` is skipped — no free model uses
- * it today and its tool shape differs; unknown families default to
- * chat-completions, the family every other free model uses.
+ * it today and its tool shape (`functionDeclarations`) differs from all three
+ * wrappers, so the payload is left untouched rather than mangled. Unknown
+ * families default to chat-completions, the family every other free model
+ * uses.
  */
 export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): unknown {
+	if (api === "google-generative-ai") return payload;
 	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
 	const obj = payload as Record<string, unknown>;
 	const tools = obj.tools;

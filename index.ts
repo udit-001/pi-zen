@@ -145,14 +145,21 @@ let zenCache: { expiresAt: number; models: ZenModel[] } | null = null;
  * Curated-list cache, stale-while-revalidate: `expiresAt` marks freshness,
  * but an expired entry is NOT evicted — it keeps serving (it is the
  * last-known-good list) while a background conditional request revalidates
- * it. `etag`/`lastModified` are jsdelivr's validators for that request.
+ * it. Only ever assigned together with a fully-parsed model list — there is
+ * no "placeholder" state a concurrent caller could observe mid-fetch.
  */
 let freeModelsCache: {
 	expiresAt: number;
 	models: FreeModelEntry[];
-	etag?: string;
-	lastModified?: string;
 } | null = null;
+/**
+ * Response validators (ETag / Last-Modified) for the conditional
+ * revalidation, kept OUTSIDE the cache: they are captured from response
+ * headers before the body is parsed, and parking them in freeModelsCache
+ * would force a placeholder cache entry — which a concurrent caller in the
+ * stale-serve branch would happily hand out as an empty model list.
+ */
+let freeModelsValidators: { etag?: string; lastModified?: string } = {};
 /** In-flight background revalidation; concurrent triggers share one fetch. */
 let freeModelsRevalidate: Promise<void> | null = null;
 /** When the registered curated list last actually changed (Date.now()). */
@@ -212,6 +219,24 @@ function readBundledSnapshot(): ZenModelConfig[] {
 
 function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
 	try {
+		// Skip the write when the disk snapshot already holds this exact list
+		// (savedAt aside): resolveModels runs on every session_start and CDN
+		// revalidations are frequent — rewriting the same bytes each time is
+		// churn, not signal.
+		try {
+			const disk = JSON.parse(readFileSync(getSnapshotPath(), "utf8")) as Snapshot;
+			if (
+				deepEqualJson(
+					disk.models.map((m) => ({ ...m, api: m.api ?? "openai-completions" })),
+					models.map((m) => ({ ...m, api: m.api ?? "openai-completions" })),
+				) &&
+				(disk.defaultModel ?? undefined) === (defaultModel ?? undefined)
+			) {
+				return;
+			}
+		} catch {
+			// No readable snapshot — fall through and write one.
+		}
 		const dir = join(getAgentDir(), "cache");
 		mkdirSync(dir, { recursive: true });
 		const payload = JSON.stringify({ savedAt: Date.now(), defaultModel, models } satisfies Snapshot);
@@ -418,17 +443,14 @@ async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEn
  * Capture response validators (ETag / Last-Modified) for the next conditional
  * revalidation. Both date-stamps exist because jsdelivr answers 304 to
  * If-None-Match but some intermediaries strip ETags — Last-Modified covers
- * that case, and only one of them is ever sent.
+ * that case, and only one of them is ever sent. Header-only: safe to call
+ * before the body is parsed, and never touches the servable cache.
  */
 function storeFreeModelsResponse(res: Response): void {
-	const etag = res.headers.get("etag") ?? undefined;
-	const lastModified = res.headers.get("last-modified") ?? undefined;
-	if (freeModelsCache) {
-		freeModelsCache.etag = etag;
-		freeModelsCache.lastModified = lastModified;
-	} else {
-		freeModelsCache = { expiresAt: 0, models: [], etag, lastModified };
-	}
+	freeModelsValidators = {
+		etag: res.headers.get("etag") ?? undefined,
+		lastModified: res.headers.get("last-modified") ?? undefined,
+	};
 }
 
 /**
@@ -440,10 +462,9 @@ function storeFreeModelsResponse(res: Response): void {
  */
 function revalidateFreeModels(): Promise<void> {
 	freeModelsRevalidate ??= (async () => {
-		const cache = freeModelsCache!;
 		const headers: Record<string, string> = { Accept: "application/json" };
-		if (cache.etag) headers["If-None-Match"] = cache.etag;
-		else if (cache.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+		if (freeModelsValidators.etag) headers["If-None-Match"] = freeModelsValidators.etag;
+		else if (freeModelsValidators.lastModified) headers["If-Modified-Since"] = freeModelsValidators.lastModified;
 
 		try {
 			const res = await fetch(FREE_MODELS_CDN_URL, {
@@ -452,7 +473,7 @@ function revalidateFreeModels(): Promise<void> {
 			});
 
 			if (res.status === 304) {
-				cache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+				if (freeModelsCache) freeModelsCache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
 				return;
 			}
 			if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
@@ -470,7 +491,7 @@ function revalidateFreeModels(): Promise<void> {
 			if (changed) console.error(`[pi-zen] free-models list updated (${data.models.length} model(s))`);
 		} catch {
 			// Network/validation failure — keep serving the stale list.
-			cache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+			if (freeModelsCache) freeModelsCache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
 		} finally {
 			freeModelsRevalidate = null;
 		}
@@ -488,9 +509,24 @@ function applyFreeModels(models: FreeModelEntry[], defaultModel?: string): boole
 	return changed;
 }
 
-/** JSON-semantic equality so key ordering never causes a false "changed". */
+/**
+ * JSON-semantic equality: key ordering never causes a false "changed"
+ * (plain JSON.stringify is order-sensitive; both sides are canonicalized
+ * with recursively sorted keys first).
+ */
 function deepEqualJson(a: unknown, b: unknown): boolean {
-	return JSON.stringify(a) === JSON.stringify(b);
+	return canonicalJsonString(a) === canonicalJsonString(b);
+}
+
+function canonicalJsonString(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalJsonString).join(",")}]`;
+	if (typeof value === "object" && value !== null) {
+		const entries = Object.entries(value as Record<string, unknown>)
+			.filter(([, v]) => v !== undefined)
+			.sort(([k1], [k2]) => (k1 < k2 ? -1 : k1 > k2 ? 1 : 0));
+		return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJsonString(v)}`).join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
