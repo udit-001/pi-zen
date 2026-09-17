@@ -1,13 +1,15 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-09-17T16:04:57.599Z",
+	"generatedAt": "2026-09-17T19:49:17.655Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 5,
+	"count": 6,
 	"defaultModel": "big-pickle",
+	"opencodeVersion": "1.18.31",
 	"models": [
 		{
 			"id": "big-pickle",
 			"name": "Big Pickle",
+			"api": "openai-completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -30,8 +32,28 @@
 			}
 		},
 		{
+			"id": "union-alpha",
+			"name": "Union Alpha Free",
+			"api": "anthropic-messages",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {}
+		},
+		{
 			"id": "mimo-v2.5-free",
 			"name": "MiMo V2.5 Free",
+			"api": "openai-completions",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -57,6 +79,7 @@
 		{
 			"id": "ling-3.0-flash-fin-free",
 			"name": "Ling 3.0 Flash Fin Free",
+			"api": "openai-completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -80,6 +103,7 @@
 		{
 			"id": "nemotron-3-ultra-free",
 			"name": "Nemotron 3 Ultra Free",
+			"api": "openai-completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -104,6 +128,7 @@
 		{
 			"id": "nemotron-3.5-lightning-free",
 			"name": "Nemotron 3.5 Lightning Free",
+			"api": "openai-completions",
 			"reasoning": true,
 			"input": [
 				"text"
