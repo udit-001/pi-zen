@@ -22,7 +22,25 @@ import { join } from "node:path";
 
 const DOCS_URL = "https://opencode.ai/docs/zen";
 const MODELS_DEV_URL = "https://models.dev/api.json";
+// Registry (not the GitHub API) so the Action needs no token and no rate budget.
+const OPENCODE_NPM_URL = "https://registry.npmjs.org/opencode-ai/latest";
 const FETCH_TIMEOUT_MS = 15_000;
+
+// Docs endpoint → pi api family. Free models are not all OpenAI-compatible:
+// stealth models can be served over Anthropic Messages or the Responses API.
+const API_BY_ENDPOINT = [
+	{ pattern: /:stream?[gG]enerateContent/, api: "google-generative-ai" },
+	{ pattern: /\/responses\/?$/, api: "openai-responses" },
+	{ pattern: /\/messages\/?$/, api: "anthropic-messages" },
+];
+
+/** pi's api for a Zen endpoint; the OpenAI-compatible chat route is the default. */
+function apiForEndpoint(endpoint) {
+	for (const { pattern, api } of API_BY_ENDPOINT) {
+		if (pattern.test(endpoint ?? "")) return api;
+	}
+	return "openai-completions";
+}
 
 // ─── Args ────────────────────────────────────────────────────────────────────
 
@@ -112,6 +130,15 @@ async function fetchJSON(url) {
 
 // ─── Step 1: Parse the docs table ────────────────────────────────────────────
 
+/**
+ * Accept a row only when its endpoint cell is actually a URL. The docs table
+ * renders follow-up prose rows (e.g. a cell saying just "Free") through the
+ * same <table> markup — without this check they parse as garbage models.
+ */
+function isDocsModelRow(id, endpoint) {
+	return Boolean(id) && id !== "Model ID" && /^https?:\/\//i.test(endpoint);
+}
+
 function parseDocsTable(html) {
 	const models = [];
 
@@ -122,7 +149,7 @@ function parseDocsTable(html) {
 		const id = stripTags(match[2]).trim();
 		const endpoint = stripTags(match[3]).trim();
 		const sdk = stripTags(match[4]).trim();
-		if (id && id !== "Model ID") {
+		if (isDocsModelRow(id, endpoint)) {
 			models.push({ name, id, endpoint, sdk });
 		}
 	}
@@ -134,7 +161,7 @@ function parseDocsTable(html) {
 			const id = match[2].trim();
 			const endpoint = match[3].trim().replace(/`/g, "");
 			const sdk = match[4].trim();
-			if (id && id !== "Model ID" && id !== "---") {
+			if (isDocsModelRow(id, endpoint)) {
 				models.push({ name, id, endpoint, sdk });
 			}
 		}
@@ -147,15 +174,20 @@ function stripTags(html) {
 	return html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
-// ─── Step 2: Identify free models ────────────────────────────────────────────
+// ─── Step 2: Identify free models ─────────────────────────────────────────────
 
-function isFreeModel(id, endpoint) {
-	const lower = id.toLowerCase();
+/**
+ * Zen marks free models in two ways: a `-free` id suffix (the normal case) or
+ * "Free" in the display name with a plain id — the stealth models, e.g.
+ * `union-alpha` ("Union Alpha Free", served over Anthropic /messages) and the
+ * original `big-pickle`. Both spellings must match, else the docs table is the
+ * only place the free list is written down and stealth models get dropped.
+ * The endpoint is not part of the test — apiForEndpoint() handles that.
+ */
+function isFreeModel(entry) {
+	const lower = entry.id.toLowerCase();
 	if (lower === "big-pickle" || lower.endsWith("-free")) return true;
-	if (endpoint?.includes("/chat/completions") && !lower.endsWith("-free") && lower !== "big-pickle") {
-		return false;
-	}
-	return false;
+	return /(^|\s)free$/i.test(entry.name ?? "");
 }
 
 // ─── Step 3: Enrich with models.dev metadata ─────────────────────────────────
@@ -169,26 +201,35 @@ function enrichWithMetadata(freeIds, devSlice) {
 		const context = meta?.limit?.context;
 		const output = meta?.limit?.output;
 		const hasImage = Array.isArray(meta?.modalities?.input) && meta.modalities.input.includes("image");
+		const api = apiForEndpoint(entry.endpoint);
 
 		models.push({
 			id: entry.id,
 			name: meta?.name || entry.name || humanize(entry.id),
+			api,
 			reasoning,
 			thinkingLevelMap: buildThinkingLevelMap(meta),
 			input: hasImage ? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: typeof context === "number" && context > 0 ? context : 128_000,
 			maxTokens: typeof output === "number" && output > 0 ? output : 8_192,
-			compat: {
-				maxTokensField: "max_tokens",
-				supportsStore: false,
-				supportsReasoningEffort: reasoning,
-				supportsDeveloperRole: false,
-				supportsUsageInStreaming: false,
-				...(reasoning && needsReasoningReplay(meta)
-					? { requiresReasoningContentOnAssistantMessages: true }
-					: {}),
-			},
+			// Compat is family-aware: these flags describe the OpenAI-completions
+			// wire (maxTokensField names the max-tokens field, store/developer/
+			// usage flags gate completions-only params). Other families ship an
+			// empty block — pi-ai applies its own per-key defaults there.
+			compat:
+				api === "openai-completions"
+					? {
+							maxTokensField: "max_tokens",
+							supportsStore: false,
+							supportsReasoningEffort: reasoning,
+							supportsDeveloperRole: false,
+							supportsUsageInStreaming: false,
+							...(reasoning && needsReasoningReplay(meta)
+								? { requiresReasoningContentOnAssistantMessages: true }
+								: {}),
+						}
+					: {},
 		});
 	}
 
@@ -276,14 +317,25 @@ async function main() {
 	console.error(`📋 Found ${allModels.length} models in docs table`);
 
 	// Identify free models: -free suffix or big-pickle
-	const freeModels = allModels.filter(
-		(m) => m.id.toLowerCase() === "big-pickle" || m.id.toLowerCase().endsWith("-free"),
-	);
+	const freeModels = allModels.filter(isFreeModel);
 	console.error(`🆓 Identified ${freeModels.length} free models`);
 
 	if (freeModels.length === 0) {
 		console.error("⚠️  No free models found — docs format may have changed");
 		process.exit(1);
+	}
+
+	// Latest opencode release — the extension copies this into its User-Agent so
+	// the header keeps matching a current opencode build without a reinstall.
+	let opencodeVersion;
+	try {
+		const pkg = await fetchJSON(OPENCODE_NPM_URL);
+		if (typeof pkg?.version === "string" && pkg.version) {
+			opencodeVersion = pkg.version;
+			console.error(`🔢 Latest opencode: ${opencodeVersion}`);
+		}
+	} catch (err) {
+		console.error(`⚠️  opencode version lookup failed: ${err.message} — omitting`);
 	}
 
 	// Fetch models.dev for metadata enrichment
@@ -318,6 +370,7 @@ async function main() {
 		source: DOCS_URL,
 		count: enriched.length,
 		defaultModel,
+		...(opencodeVersion ? { opencodeVersion } : {}),
 		models: enriched,
 	};
 

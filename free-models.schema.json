@@ -23,6 +23,10 @@
 			"type": "string",
 			"description": "Recommended default model id for first-time users and fallback"
 		},
+		"opencodeVersion": {
+			"type": "string",
+			"description": "Latest opencode release at build time — the extension uses it in its User-Agent"
+		},
 		"models": {
 			"type": "array",
 			"items": {
@@ -34,7 +38,7 @@
 	"definitions": {
 		"FreeModelEntry": {
 			"type": "object",
-			"required": ["id", "name", "reasoning", "input", "cost", "contextWindow", "maxTokens", "compat"],
+			"required": ["id", "name", "reasoning", "input", "cost", "contextWindow", "maxTokens"],
 			"properties": {
 				"id": {
 					"type": "string",
@@ -43,6 +47,11 @@
 				"name": {
 					"type": "string",
 					"description": "Human-readable name (e.g. 'Big Pickle', 'DeepSeek V4 Flash Free')"
+				},
+				"api": {
+					"type": "string",
+					"enum": ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"],
+					"description": "pi api family for this model's Zen endpoint (absent = openai-completions)"
 				},
 				"reasoning": {
 					"type": "boolean",
@@ -72,11 +81,27 @@
 					"description": "Max output tokens"
 				},
 				"compat": {
-					"$ref": "#/definitions/Compat",
-					"description": "Provider compatibility flags"
+					"type": "object",
+					"description": "Provider compatibility flags. Required with the full Compat shape for openai-completions models; other endpoint families ship an empty object (pi-ai applies its own defaults)."
 				}
 			},
-			"additionalProperties": false
+			"additionalProperties": false,
+			"allOf": [
+				{
+					"if": {
+						"anyOf": [
+							{ "not": { "required": ["api"] } },
+							{ "properties": { "api": { "const": "openai-completions" } } }
+						]
+					},
+					"then": {
+						"required": ["compat"],
+						"properties": {
+							"compat": { "$ref": "#/definitions/Compat" }
+						}
+					}
+				}
+			]
 		},
 		"ThinkingLevelMap": {
 			"type": "object",
