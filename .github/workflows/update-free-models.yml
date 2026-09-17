@@ -41,6 +41,7 @@ jobs:
           node scripts/build-free-models.mjs --out "$RUNNER_TEMP" --pretty $OVERRIDES_FLAG
 
       - name: Commit to data branch
+        id: commit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -73,3 +74,25 @@ jobs:
 
           git push origin data
           echo "✅ Pushed free-models.json to data branch"
+          # Signal the purge step below; skipped when nothing was pushed.
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Purge jsdelivr CDN cache
+        # Only needed when the file actually changed — unchanged content means
+        # the CDN is already serving exactly what we would publish.
+        if: steps.commit.outputs.pushed == 'true'
+        run: |
+          # The extension fetches free-models.json through jsdelivr, whose edge
+          # keeps serving the previous file until purged (observed for hours).
+          # Without this, users stay on a stale model list after every refresh.
+          PURGE_URL="https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/free-models.json"
+          if ! BODY=$(curl -sS --fail --retry 3 --retry-delay 5 "$PURGE_URL"); then
+            echo "❌ jsdelivr purge request failed — the CDN will keep serving the stale list until its cache expires."
+            exit 1
+          fi
+          echo "$BODY"
+          if echo "$BODY" | grep -q '"throttled":[[:space:]]*true'; then
+            echo "⚠️  jsdelivr throttled this purge — some edges may keep the old file until their TTL expires."
+          else
+            echo "✅ jsdelivr CDN purged — edges re-fetch the updated free-models.json on next request"
+          fi
