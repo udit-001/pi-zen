@@ -9,6 +9,20 @@
     "pi-extension",
     "opencode-zen"
   ],
+  "files": [
+    "index.ts",
+    "shared.ts",
+    "free-models.json",
+    "free-models.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
@@ -16,5 +30,10 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
   }
 }
