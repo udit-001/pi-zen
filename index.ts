@@ -46,7 +46,10 @@ import {
 // runs every 6 hours + on manual dispatch.
 //
 // Resolution flow:
-//   1. Fetch free-models.json from jsdelivr CDN (1 h TTL).
+//   1. Serve the cached free-models.json list immediately; stale entries are
+//      revalidated in the background with If-None-Match/If-Modified-Since
+//      (jsdelivr answers 304 when the Action's output is unchanged — no
+//      wasted download).
 //   2. Register all listed models — metadata is already baked in.
 //   3. Fallback: if CDN fails, use the last-known-good in-memory set,
 //      then the disk snapshot at ~/.pi/agent/cache/pi-zen-models.json,
@@ -93,7 +96,10 @@ const FREE_MODELS_CDN_URL =
 	"https://cdn.jsdelivr.net/gh/udit-001/pi-zen@data/free-models.json";
 
 // Zen's live list is tiny — refresh aggressively. The curated free-models.json
-// from CDN is a small payload and changes infrequently — cache it for 1 hour.
+// is served stale-while-revalidate: the TTL only decides when a background
+// conditional revalidation runs, never blocks a caller. jsdelivr honors
+// If-None-Match, so an unchanged list revalidates as a body-less 304 and
+// polling is effectively free.
 const MODEL_CACHE_TTL_MS = 60_000;
 const FREE_MODELS_CDN_TTL_MS = 3_600_000;
 const FETCH_TIMEOUT_MS = 8_000;
@@ -135,7 +141,22 @@ type Snapshot = {
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let zenCache: { expiresAt: number; models: ZenModel[] } | null = null;
-let freeModelsCache: { expiresAt: number; models: FreeModelEntry[] } | null = null;
+/**
+ * Curated-list cache, stale-while-revalidate: `expiresAt` marks freshness,
+ * but an expired entry is NOT evicted — it keeps serving (it is the
+ * last-known-good list) while a background conditional request revalidates
+ * it. `etag`/`lastModified` are jsdelivr's validators for that request.
+ */
+let freeModelsCache: {
+	expiresAt: number;
+	models: FreeModelEntry[];
+	etag?: string;
+	lastModified?: string;
+} | null = null;
+/** In-flight background revalidation; concurrent triggers share one fetch. */
+let freeModelsRevalidate: Promise<void> | null = null;
+/** When the registered curated list last actually changed (Date.now()). */
+let freeModelsUpdatedAt = 0;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
 /** CDN-provided default model id (from free-models.json `defaultModel` field). */
@@ -356,12 +377,26 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
 /**
  * Curated free-model list from the data branch (maintained by GitHub Action).
  * Contains full model metadata — no runtime models.dev join required.
- * jsdelivr caches for ~1 hour; we mirror that TTL locally.
+ *
+ * Stale-while-revalidate: a fresh cache answers instantly; a stale cache
+ * KEEPS answering (it is the last-known-good list) and a single background
+ * conditional request revalidates it. jsdelivr honors If-None-Match, so an
+ * unchanged list costs a body-less 304 instead of a re-download. Never
+ * throws on network failure while a stale entry exists — the caller's list
+ * survives CDN outages.
  */
 async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEntry[]; defaultModel?: string }> {
-	if (!force && freeModelsCache && freeModelsCache.expiresAt > Date.now()) {
+	if (!force && freeModelsCache) {
+		if (freeModelsCache.expiresAt > Date.now()) {
+			return { models: freeModelsCache.models, defaultModel: cdnDefaultModel ?? undefined };
+		}
+		// Stale — serve it and revalidate in the background. All triggers share
+		// one in-flight fetch; only the force path skips this so a hard refresh
+		// really hits the network synchronously.
+		revalidateFreeModels();
 		return { models: freeModelsCache.models, defaultModel: cdnDefaultModel ?? undefined };
 	}
+
 	const res = await fetch(FREE_MODELS_CDN_URL, {
 		headers: { Accept: "application/json" },
 		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -369,14 +404,93 @@ async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEn
 	if (!res.ok) {
 		throw new Error(`HTTP ${res.status} ${res.statusText}`);
 	}
+	storeFreeModelsResponse(res);
 	const data = await res.json();
 	if (!validateFreeModelsFile(data)) {
 		throw new Error("Curated free-models.json failed validation — data may be corrupted or schema drifted");
 	}
-	freeModelsCache = { expiresAt: Date.now() + FREE_MODELS_CDN_TTL_MS, models: data.models };
-	cdnDefaultModel = typeof data.defaultModel === "string" ? data.defaultModel : null;
+	applyFreeModels(data.models, typeof data.defaultModel === "string" ? data.defaultModel : undefined);
 	if (data.opencodeVersion) opencodeVersion = data.opencodeVersion;
 	return { models: data.models, defaultModel: cdnDefaultModel ?? undefined };
+}
+
+/**
+ * Capture response validators (ETag / Last-Modified) for the next conditional
+ * revalidation. Both date-stamps exist because jsdelivr answers 304 to
+ * If-None-Match but some intermediaries strip ETags — Last-Modified covers
+ * that case, and only one of them is ever sent.
+ */
+function storeFreeModelsResponse(res: Response): void {
+	const etag = res.headers.get("etag") ?? undefined;
+	const lastModified = res.headers.get("last-modified") ?? undefined;
+	if (freeModelsCache) {
+		freeModelsCache.etag = etag;
+		freeModelsCache.lastModified = lastModified;
+	} else {
+		freeModelsCache = { expiresAt: 0, models: [], etag, lastModified };
+	}
+}
+
+/**
+ * One shared background revalidation: conditional request with the stored
+ * validators → 304 refreshes only the freshness timer (no re-registration,
+ * no churn); 200 replaces the list and the change-aware caller re-registers.
+ * Any failure leaves the stale entry untouched; the timer is still advanced
+ * so a broken CDN does not convert into a busy retry loop.
+ */
+function revalidateFreeModels(): Promise<void> {
+	freeModelsRevalidate ??= (async () => {
+		const cache = freeModelsCache!;
+		const headers: Record<string, string> = { Accept: "application/json" };
+		if (cache.etag) headers["If-None-Match"] = cache.etag;
+		else if (cache.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+
+		try {
+			const res = await fetch(FREE_MODELS_CDN_URL, {
+				headers,
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+
+			if (res.status === 304) {
+				cache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+				return;
+			}
+			if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+			storeFreeModelsResponse(res);
+			const data = await res.json();
+			if (!validateFreeModelsFile(data)) {
+				throw new Error("Curated free-models.json failed validation");
+			}
+			const changed = applyFreeModels(
+				data.models,
+				typeof data.defaultModel === "string" ? data.defaultModel : undefined,
+			);
+			if (data.opencodeVersion) opencodeVersion = data.opencodeVersion;
+			if (changed) console.error(`[pi-zen] free-models list updated (${data.models.length} model(s))`);
+		} catch {
+			// Network/validation failure — keep serving the stale list.
+			cache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+		} finally {
+			freeModelsRevalidate = null;
+		}
+	})();
+	return freeModelsRevalidate;
+}
+
+/** Install a (possibly new) curated list; returns true when it differs from the registered one. */
+function applyFreeModels(models: FreeModelEntry[], defaultModel?: string): boolean {
+	const changed = !deepEqualJson(freeModelsCache?.models ?? null, models);
+	freeModelsCache!.models = models;
+	freeModelsCache!.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+	cdnDefaultModel = defaultModel ?? null;
+	if (changed) freeModelsUpdatedAt = Date.now();
+	return changed;
+}
+
+/** JSON-semantic equality so key ordering never causes a false "changed". */
+function deepEqualJson(a: unknown, b: unknown): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
@@ -462,6 +576,23 @@ async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
 	const models = await resolveOrRecover();
 	registerProvider(pi, models);
 	return models.length;
+}
+
+/**
+ * Re-register from the curated cache only when the list actually changed.
+ * Returns true when a new list was applied. The `knownAt` token makes the
+ * check race-safe: callers snapshot `freeModelsUpdatedAt` BEFORE kicking
+ * revalidation; a 304 leaves the timestamp untouched (nothing applied), a
+ * real change moves it (list applied, lastGood + disk snapshot refreshed).
+ */
+function applyFreeModelsIfChanged(pi: ExtensionAPI, knownAt: number): boolean {
+	if (freeModelsUpdatedAt === knownAt) return false; // 304 / no change
+	const configs = (freeModelsCache?.models ?? []).map(fromFreeModelEntry);
+	if (configs.length === 0) return false;
+	registerProvider(pi, configs);
+	lastGood = configs;
+	writeSnapshot(configs, cdnDefaultModel ?? undefined);
+	return true;
 }
 
 // ─── Model Restore ───────────────────────────────────────────────────────────
@@ -632,24 +763,32 @@ export default async function (pi: ExtensionAPI) {
 
 	// ─── Events ──────────────────────────────────────────────────────────────
 
-	// Background refresh every 6 hours (stale-while-revalidate).
+	// Background revalidation every 2 h. The request is conditional, so an
+	// unchanged list costs a body-less 304 — and only a REAL list change
+	// re-registers the provider (see applyFreeModelsIfChanged). A tick with a
+	// still-fresh cache (a recent session_start refreshed the timer) is a no-op.
 	setInterval(() => {
-		fetchFreeModelsList(true)
-			.then(({ models: curated }) => {
-				if (curated.length > 0) {
-					const configs = curated.map(fromFreeModelEntry);
-					registerProvider(pi, configs);
-				}
+		if (freeModelsCache && freeModelsCache.expiresAt > Date.now()) return;
+		const knownAt = freeModelsUpdatedAt;
+		revalidateFreeModels()
+			.then(() => {
+				applyFreeModelsIfChanged(pi, knownAt);
 			})
 			.catch(() => {
-				// Silent — next session_start will retry.
+				// revalidateFreeModels resolves on all paths; kept for safety.
 			});
 	}, FREE_MODELS_CDN_TTL_MS * 2);
 
-	// Re-register on session_start (reload/new/fork) with a refreshed model list
-	// (CDN 1 h TTL) and UI feedback about the API-key state.
+	// Re-register on session_start (reload/new/fork). A stale cache serves
+	// instantly and kicks the shared background revalidation; join that
+	// in-flight request (if any) and apply a changed list HERE too — the 2 h
+	// interval would otherwise leave this session on the old registration
+	// until its next tick (see applyFreeModelsIfChanged).
 	pi.on("session_start", async (_event, ctx) => {
+		const knownAt = freeModelsUpdatedAt;
 		const count = await refreshAndRegister(pi);
+		if (freeModelsRevalidate) await freeModelsRevalidate;
+		applyFreeModelsIfChanged(pi, knownAt);
 
 		// Re-apply the session's (or default) pi-zen model — pi's own restore ran
 		// before our provider registered. See Model Restore note above.
