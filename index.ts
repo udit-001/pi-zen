@@ -502,8 +502,10 @@ function revalidateFreeModels(): Promise<void> {
 /** Install a (possibly new) curated list; returns true when it differs from the registered one. */
 function applyFreeModels(models: FreeModelEntry[], defaultModel?: string): boolean {
 	const changed = !deepEqualJson(freeModelsCache?.models ?? null, models);
-	freeModelsCache!.models = models;
-	freeModelsCache!.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
+	// First call: freeModelsCache is null — initialise it instead of crashing.
+	if (!freeModelsCache) freeModelsCache = { expiresAt: 0, models: [] };
+	freeModelsCache.models = models;
+	freeModelsCache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
 	cdnDefaultModel = defaultModel ?? null;
 	if (changed) freeModelsUpdatedAt = Date.now();
 	return changed;
