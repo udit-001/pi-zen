@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-09-17T20:52:30.368Z",
+	"generatedAt": "2026-09-18T02:49:00.898Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 6,
 	"defaultModel": "big-pickle",
@@ -35,10 +35,9 @@
 			"id": "union-alpha",
 			"name": "Union Alpha Free",
 			"api": "anthropic-messages",
-			"reasoning": true,
+			"reasoning": false,
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"cost": {
 				"input": 0,
@@ -46,8 +45,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
-			"maxTokens": 131072,
+			"contextWindow": 128000,
+			"maxTokens": 8192,
 			"compat": {}
 		},
 		{
