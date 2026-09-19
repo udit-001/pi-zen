@@ -1,11 +1,35 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-09-19T02:47:29.110Z",
+	"generatedAt": "2026-09-19T10:10:29.429Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 5,
+	"count": 6,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "1.18.31",
 	"models": [
+		{
+			"id": "jev-1.13-free",
+			"name": "Jev 1.13 Free",
+			"api": "openai-completions",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 64000,
+			"maxTokens": 8192,
+			"compat": {
+				"maxTokensField": "max_tokens",
+				"supportsStore": false,
+				"supportsReasoningEffort": false,
+				"supportsDeveloperRole": false,
+				"supportsUsageInStreaming": false
+			}
+		},
 		{
 			"id": "big-pickle",
 			"name": "Big Pickle",
