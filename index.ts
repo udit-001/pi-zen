@@ -136,7 +136,6 @@ type ZenModel = {
 
 type Snapshot = {
 	savedAt: number;
-	defaultModel?: string;
 	models: ZenModelConfig[];
 };
 
@@ -168,8 +167,6 @@ let freeModelsRevalidate: Promise<void> | null = null;
 let freeModelsUpdatedAt = 0;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
-/** CDN-provided default model id (from free-models.json `defaultModel` field). */
-let cdnDefaultModel: string | null = null;
 /** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped to >= 1.17 (validOpencodeVersion): OpenCode's server rejects lower versions with 403/426. */
 let opencodeVersion = OPENCODE_VERSION_FALLBACK;
 /** Resolved on first use: the project id opencode would compute for this cwd. */
@@ -229,7 +226,7 @@ function readBundledSnapshot(): ZenModelConfig[] {
 	}
 }
 
-function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
+function writeSnapshot(models: ZenModelConfig[]): void {
 	try {
 		// Skip the write when the disk snapshot already holds this exact list
 		// (savedAt aside): resolveModels runs on every session_start and CDN
@@ -241,8 +238,7 @@ function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
 				deepEqualJson(
 					disk.models.map((m) => ({ ...m, api: m.api ?? "openai-completions" })),
 					models.map((m) => ({ ...m, api: m.api ?? "openai-completions" })),
-				) &&
-				(disk.defaultModel ?? undefined) === (defaultModel ?? undefined)
+				)
 			) {
 				return;
 			}
@@ -251,7 +247,7 @@ function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
 		}
 		const dir = join(getAgentDir(), "cache");
 		mkdirSync(dir, { recursive: true });
-		const payload = JSON.stringify({ savedAt: Date.now(), defaultModel, models } satisfies Snapshot);
+		const payload = JSON.stringify({ savedAt: Date.now(), models } satisfies Snapshot);
 		// Write-then-rename keeps readers off partial files on POSIX. On Windows,
 		// renaming over an existing destination can transiently fail with EPERM
 		// (antivirus / a concurrent pi holding it) — fall back to a direct write,
@@ -270,25 +266,6 @@ function writeSnapshot(models: ZenModelConfig[], defaultModel?: string): void {
 	} catch {
 		// Best-effort persistence.
 	}
-}
-
-/**
- * Global default model from settings.json — written by pi every time the user
- * picks a model (/model, Ctrl+P, setModel). Used as the fallback intent when a
- * session has no model of its own yet (brand-new sessions).
- */
-function getSettingsDefaultModel(): { provider: string; modelId: string } | null {
-	try {
-		const settings = JSON.parse(
-			readFileSync(join(getAgentDir(), "settings.json"), "utf8"),
-		) as { defaultProvider?: string; defaultModel?: string };
-		if (settings?.defaultProvider && settings?.defaultModel) {
-			return { provider: settings.defaultProvider, modelId: settings.defaultModel };
-		}
-	} catch {
-		// No/unreadable settings — no intent recoverable.
-	}
-	return null;
 }
 
 /** Key stored by `/login pi-zen` in auth.json (pi's official credential store). */
@@ -422,16 +399,16 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
  * throws on network failure while a stale entry exists — the caller's list
  * survives CDN outages.
  */
-async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEntry[]; defaultModel?: string }> {
+async function fetchFreeModelsList(force = false): Promise<FreeModelEntry[]> {
 	if (!force && freeModelsCache) {
 		if (freeModelsCache.expiresAt > Date.now()) {
-			return { models: freeModelsCache.models, defaultModel: cdnDefaultModel ?? undefined };
+			return freeModelsCache.models;
 		}
 		// Stale — serve it and revalidate in the background. All triggers share
 		// one in-flight fetch; only the force path skips this so a hard refresh
 		// really hits the network synchronously.
 		revalidateFreeModels();
-		return { models: freeModelsCache.models, defaultModel: cdnDefaultModel ?? undefined };
+		return freeModelsCache.models;
 	}
 
 	const res = await fetch(FREE_MODELS_CDN_URL, {
@@ -446,9 +423,9 @@ async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEn
 	if (!validateFreeModelsFile(data)) {
 		throw new Error("Curated free-models.json failed validation — data may be corrupted or schema drifted");
 	}
-	applyFreeModels(data.models, typeof data.defaultModel === "string" ? data.defaultModel : undefined);
+	applyFreeModels(data.models);
 	if (data.opencodeVersion) opencodeVersion = validOpencodeVersion(data.opencodeVersion);
-	return { models: data.models, defaultModel: cdnDefaultModel ?? undefined };
+	return data.models;
 }
 
 /**
@@ -495,10 +472,7 @@ function revalidateFreeModels(): Promise<void> {
 			if (!validateFreeModelsFile(data)) {
 				throw new Error("Curated free-models.json failed validation");
 			}
-			const changed = applyFreeModels(
-				data.models,
-				typeof data.defaultModel === "string" ? data.defaultModel : undefined,
-			);
+			const changed = applyFreeModels(data.models);
 			if (data.opencodeVersion) opencodeVersion = validOpencodeVersion(data.opencodeVersion);
 			if (changed) console.error(`[pi-zen] free-models list updated (${data.models.length} model(s))`);
 		} catch {
@@ -512,13 +486,12 @@ function revalidateFreeModels(): Promise<void> {
 }
 
 /** Install a (possibly new) curated list; returns true when it differs from the registered one. */
-function applyFreeModels(models: FreeModelEntry[], defaultModel?: string): boolean {
+function applyFreeModels(models: FreeModelEntry[]): boolean {
 	const changed = !deepEqualJson(freeModelsCache?.models ?? null, models);
 	// First call: freeModelsCache is null — initialise it instead of crashing.
 	if (!freeModelsCache) freeModelsCache = { expiresAt: 0, models: [] };
 	freeModelsCache.models = models;
 	freeModelsCache.expiresAt = Date.now() + FREE_MODELS_CDN_TTL_MS;
-	cdnDefaultModel = defaultModel ?? null;
 	if (changed) freeModelsUpdatedAt = Date.now();
 	return changed;
 }
@@ -557,13 +530,13 @@ function canonicalJsonString(value: unknown): string {
  * A successful primary resolve becomes the new last-known-good.
  */
 async function resolveModels(): Promise<ZenModelConfig[]> {
-	const { models: curated, defaultModel } = await fetchFreeModelsList();
+	const curated = await fetchFreeModelsList();
 	if (curated.length === 0) {
 		throw new Error("Curated free-models list is empty");
 	}
 	const configs = curated.map(fromFreeModelEntry);
 	lastGood = configs;
-	writeSnapshot(configs, defaultModel);
+	writeSnapshot(configs);
 	return configs;
 }
 
@@ -641,78 +614,48 @@ function applyFreeModelsIfChanged(pi: ExtensionAPI, knownAt: number): boolean {
 	if (configs.length === 0) return false;
 	registerProvider(pi, configs);
 	lastGood = configs;
-	writeSnapshot(configs, cdnDefaultModel ?? undefined);
+	writeSnapshot(configs);
 	return true;
 }
 
 // ─── Model Restore ───────────────────────────────────────────────────────────
 //
-// pi resolves the session's model (createAgentSession) BEFORE extension
-// factories finish registering providers — our factory awaits network fetches,
-// so registerProvider lands a few ms after the restore block has already run.
-// Any pi-zen model recorded in the session (or as the settings default) is
-// therefore silently dropped in favor of the first authenticated native
-// model. pi already persists everything needed to repair this — the session
-// file records every model_change, and settings.json holds the last pick —
-// so on session_start (post-registration) we simply re-apply the model pi
-// intended. No extra state of our own.
-
-/**
- * Update the settings.json with the new default model.
- */
-function updateSettingsDefaultModel(modelId: string): void {
-	try {
-		const settingsPath = join(getAgentDir(), "settings.json");
-		const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-		settings.defaultProvider = PROVIDER_ID;
-		settings.defaultModel = modelId;
-		writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-	} catch {
-		// Best-effort — don't block if settings write fails
-	}
-}
+// pi picks the session's model (createAgentSession) while extension factories
+// are still loading — ours awaits network fetches, so the pi-zen models are
+// not yet visible when pi resolves. A pi-zen model the user CHOSE (`--model`
+// on the CLI, `/model` in the TUI, or a resumed session) can therefore be
+// silently dropped in favor of the first authenticated native model.
+//
+// The session file records every model_change, so on session_start
+// (post-registration) we re-apply whichever pi-zen model the branch actually
+// recorded — the same last-recorded rule pi itself uses
+// (getSessionContextSettings). Nothing is invented: no settings.json writes,
+// no free-models.json `defaultModel`, no hard-coded fallback. If the branch
+// doesn't name a pi-zen model, pi's own resolution (which already honors the
+// user's configured default provider) is left untouched.
 
 async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	try {
-		// Same resolution rule as pi's getSessionContextSettings: last
-		// model_change / assistant message on the current branch wins. For
-		// brand-new sessions pi seeds the branch with its own (post-fallback)
-		// model choice, so only trust branch history when real messages exist;
-		// otherwise the user's settings default is the intent to honor.
+		// Honor the pi-zen model the branch actually recorded — the last
+		// model_change / assistant message. We only ever RESTORE what the
+		// record names; there is no default to re-impose.
 		const branch = ctx.sessionManager.getBranch();
 		let fromSession: { provider: string; modelId: string } | null = null;
-		if (branch.some((entry) => entry.type === "message")) {
-			for (const entry of branch) {
-				if (entry.type === "model_change") {
-					fromSession = { provider: entry.provider, modelId: entry.modelId };
-				} else if (entry.type === "message" && entry.message.role === "assistant") {
-					const { provider, model } = entry.message;
-					if (provider && model) fromSession = { provider, modelId: model };
-				}
+		for (const entry of branch) {
+			if (entry.type === "model_change") {
+				fromSession = { provider: entry.provider, modelId: entry.modelId };
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
+				const { provider, model } = entry.message;
+				if (provider && model) fromSession = { provider, modelId: model };
 			}
 		}
-		const intended = fromSession ?? getSettingsDefaultModel();
+		const intended = fromSession;
 		if (!intended || intended.provider !== PROVIDER_ID) return;
 
 		const current = ctx.model;
 		if (current?.provider === PROVIDER_ID && current.id === intended.modelId) return;
 
-		let model = ctx.modelRegistry.find(PROVIDER_ID, intended.modelId);
-
-		// If the intended model isn't available, fall back to the CDN-provided default
-		if (!model) {
-			const fallback = cdnDefaultModel || "big-pickle";
-			if (intended.modelId !== fallback) {
-				model = ctx.modelRegistry.find(PROVIDER_ID, fallback);
-				if (model) {
-					console.log(
-						`${PROVIDER_ID}: Model "${intended.modelId}" not available, falling back to "${fallback}"`,
-					);
-					updateSettingsDefaultModel(fallback);
-				}
-			}
-		}
-
+		const model = ctx.modelRegistry.find(PROVIDER_ID, intended.modelId);
 		if (model) await pi.setModel(model);
 	} catch {
 		// Best-effort repair — never block session startup.
@@ -843,7 +786,7 @@ export default async function (pi: ExtensionAPI) {
 		if (freeModelsRevalidate) await freeModelsRevalidate;
 		applyFreeModelsIfChanged(pi, knownAt);
 
-		// Re-apply the session's (or default) pi-zen model — pi's own restore ran
+		// Re-apply the pi-zen model the session recorded — pi's own resolve ran
 		// before our provider registered. See Model Restore note above.
 		await restoreIntendedModel(pi, ctx);
 
