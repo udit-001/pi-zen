@@ -742,9 +742,10 @@ async function restoreIntendedModel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 // ASCII only, diagnosis on line 1, numbered one-action recovery steps ranked
 // best first, list cap 5, no re-narrating the diagnosis in prose. Surface
 // layer contract (layers-surface): the message must diagnose (line 1),
-// explain (step 2: the quota resets — not permanent, not the user's fault),
-// and recover (ranked steps). Terms are the extension's ubiquitous language:
-// "usage limit" (opencode's own term), "free model", "Zen", "reset".
+// explain (step 2: the free tier is one shared anonymous pool — switching
+// models won't help, and the limit resets), and recover (ranked steps). Terms
+// are the extension's ubiquitous language: "usage limit" (opencode's own
+// term), "free model", "Zen", "reset".
 
 const ZEN_QUOTA_ERROR_PATTERN =
 	/FreeUsageLimitError|GoUsageLimitError|insufficient_quota|usage limit|quota/i;
@@ -769,9 +770,11 @@ function zenQuotaFriendlyError(msg: FailedAssistantMessage): string | undefined 
 	return [
 		`Free usage limit hit for "${msg.model}" on Zen.`,
 		"",
+		"The anonymous free tier is one shared per-network pool — another free model hits the same limit.",
+		"",
 		"Fix (best first):",
-		"1. /model -> pick another free model",
-		"2. Wait for the reset (timing varies)",
+		"1. Wait for the reset (timing varies, usually minutes)",
+		"2. /login pi-zen -> free key, gives you your own quota",
 		"3. Add credits: https://opencode.ai/zen",
 	].join("\n");
 }
