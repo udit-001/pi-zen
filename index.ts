@@ -11,7 +11,6 @@ import type {
 	ZenModelConfig,
 } from "./shared.js";
 import {
-	ZEN_FREE_TIER_PLACEHOLDER_TOOL_NAME,
 	ensureZenFreeTierShape,
 	fromFreeModelEntry,
 	humanize,
@@ -20,6 +19,7 @@ import {
 	opencodeUserAgent,
 	projectIdFromRemote,
 	validateFreeModelsFile,
+	validOpencodeVersion,
 } from "./shared.js";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -73,10 +73,12 @@ import {
 //   x-opencode-request
 //
 // Zen's free tier additionally requires an *agent-shaped* request: it serves a
-// free model only when the call streams and carries a non-empty `tools` array,
-// otherwise it answers 403 (`FreeTierError`). pi streams always, but it omits
-// `tools` for tool-less turns — so we stand in a placeholder tool. See
-// ensureZenFreeTierShape in shared.ts.
+// free model only when the call streams and the `tools` array carries both
+// `bash` AND `read` (the model must look like real opencode traffic), otherwise
+// it answers 403 (`FreeTierError`). pi streams always, but it omits `tools`
+// for tool-less turns — so we stand in `bash`/`read` decoy tools that must
+// never be called, the same cloak 9router ships (see ensureZenFreeTierShape in
+// shared.ts, verified against the live endpoint).
 
 const PROVIDER_ID = "pi-zen";
 const PROVIDER_NAME = "OpenCode Zen (Free)";
@@ -168,7 +170,7 @@ let freeModelsUpdatedAt = 0;
 let lastGood: ZenModelConfig[] | null = null;
 /** CDN-provided default model id (from free-models.json `defaultModel` field). */
 let cdnDefaultModel: string | null = null;
-/** opencode version from free-models.json — keeps the User-Agent from going stale. */
+/** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped to >= 1.17 (validOpencodeVersion): OpenCode's server rejects lower versions with 403/426. */
 let opencodeVersion = OPENCODE_VERSION_FALLBACK;
 /** Resolved on first use: the project id opencode would compute for this cwd. */
 let projectId: string | null = null;
@@ -180,6 +182,16 @@ let idCounter = 0;
  * Zen free-tier tool shape a payload needs. Rebuilt on every registration.
  */
 let apiByModelId: ReadonlyMap<string, ModelApi> = new Map();
+/**
+ * Session id → `shouldBlock` predicate returned by the session's most recent
+ * provider request. The tool_call hook consults it to decide whether a call is
+ * a decoy — and only decoys: the predicate returns true for exactly the
+ * `bash`/`read` decoys that request stood in, never for pi's real tools (pi
+ * registers its own `bash`/`read` on genuine tool turns). Keyed by session
+ * (not a global boolean) so interleaved sessions never cross-block. Cleared
+ * when a request needs no injection (its `bash`/`read` are real tools now).
+ */
+const inFlightDecoys = new Map<string, (toolName: string) => boolean>();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -435,7 +447,7 @@ async function fetchFreeModelsList(force = false): Promise<{ models: FreeModelEn
 		throw new Error("Curated free-models.json failed validation — data may be corrupted or schema drifted");
 	}
 	applyFreeModels(data.models, typeof data.defaultModel === "string" ? data.defaultModel : undefined);
-	if (data.opencodeVersion) opencodeVersion = data.opencodeVersion;
+	if (data.opencodeVersion) opencodeVersion = validOpencodeVersion(data.opencodeVersion);
 	return { models: data.models, defaultModel: cdnDefaultModel ?? undefined };
 }
 
@@ -487,7 +499,7 @@ function revalidateFreeModels(): Promise<void> {
 				data.models,
 				typeof data.defaultModel === "string" ? data.defaultModel : undefined,
 			);
-			if (data.opencodeVersion) opencodeVersion = data.opencodeVersion;
+			if (data.opencodeVersion) opencodeVersion = validOpencodeVersion(data.opencodeVersion);
 			if (changed) console.error(`[pi-zen] free-models list updated (${data.models.length} model(s))`);
 		} catch {
 			// Network/validation failure — keep serving the stale list.
@@ -861,38 +873,55 @@ export default async function (pi: ExtensionAPI) {
 	// Two jobs on every provider request:
 	//   1. drop OpenAI-only cache fields the Zen gateway may reject
 	//   2. guarantee the request shape Zen's free tier requires (see
-	//      ensureZenFreeTierShape) — pi omits `tools` on tool-less turns
+	//      ensureZenFreeTierShape) — the gate is `stream` + a `tools` array that
+	//      contains both `bash` and `read`, and pi omits `tools` on tool-less
+	//      turns (and sends `[]` when replaying tool history)
 	//
 	// Scope: applied to every provider's payload, not just our own. Forced by
 	// pi's event interface — before_provider_request carries only
 	// `{ type, payload }`, no headers, so there is nothing to gate on here (the
 	// isZenRequest gate lives on the headers event instead). Harm is bounded:
 	// unknown payload fields are stripped by the api clients anyway, and a
-	// non-Zen provider only ever sees the `_zen_noop` placeholder on tool-less
-	// turns — where it is blocked harmlessly by the tool_call hook below.
+	// non-Zen provider only ever sees the `bash`/`read` decoys on tool-less
+	// turns — where the model is told they are unavailable, chat-completions
+	// also gets `tool_choice: "none"` (responses gets `store: false` + `"auto"`
+	// + a reasoning-item sweep), and any stray call is blocked harmlessly by
+	// the tool_call hook below (only when this request actually injected them).
 	//
 	// The payload carries the model id, so apiByModelId resolves the endpoint
-	// family and with it the placeholder tool's wire shape (chat-completions,
+	// family and with it the decoy tools' wire shape (chat-completions,
 	// responses, or anthropic wrapper). Unregistered ids — other providers —
 	// get the default chat-completions shape.
-	pi.on("before_provider_request", (event) => {
+	pi.on("before_provider_request", (event, ctx) => {
 		const payload = event?.payload;
 		if (!payload || typeof payload !== "object") return;
 		const obj = payload as Record<string, unknown>;
 		delete obj.prompt_cache_key;
 		delete obj.prompt_cache_retention;
-		ensureZenFreeTierShape(obj, typeof obj.model === "string" ? apiByModelId.get(obj.model) : undefined);
+		const shaped = ensureZenFreeTierShape(
+			obj,
+			typeof obj.model === "string" ? apiByModelId.get(obj.model) : undefined,
+		);
+		const key = sessionIdFor(ctx);
+		if (shaped) {
+			inFlightDecoys.set(key, shaped.shouldBlock);
+			return shaped.payload;
+		}
+		inFlightDecoys.delete(key);
 		return obj;
 	});
 
-	// The placeholder tool exists only to satisfy that shape. If a model calls it
-	// anyway, block it with a readable result instead of letting the turn die on
-	// an unknown tool.
-	pi.on("tool_call", (event) => {
-		if (event.toolName !== ZEN_FREE_TIER_PLACEHOLDER_TOOL_NAME) return;
+	// The `bash`/`read` decoys exist only to satisfy that shape. If the model
+	// calls one anyway, block it with a readable result instead of letting the
+	// turn die on an unknown tool — but ONLY when this session's in-flight
+	// request actually stands them in: pi's own real `bash`/`read` tools must
+	// keep running untouched on normal tool turns.
+	pi.on("tool_call", (event, ctx) => {
+		const shouldBlock = inFlightDecoys.get(sessionIdFor(ctx));
+		if (!shouldBlock || !shouldBlock(event.toolName)) return;
 		return {
 			block: true,
-			reason: "Placeholder tool added for Zen free-tier compatibility — no action needed.",
+			reason: "Decoy tool added for Zen free-tier compatibility — no action needed.",
 		};
 	});
 

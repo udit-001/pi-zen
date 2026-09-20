@@ -7,9 +7,10 @@
     "types": ["node"],
     "strict": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["index.ts", "shared.ts"]
+  "include": ["index.ts", "shared.ts", "tests/**/*.ts"]
 }
