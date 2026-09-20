@@ -190,6 +190,26 @@ function isFreeModel(entry) {
 	return /(^|\s)free$/i.test(entry.name ?? "");
 }
 
+/**
+ * Free models verified live against the Zen gateway (200 + streamed turn) but
+ * not yet listed in the opencode.ai/zen docs table — so the docs scrape above
+ * can't see them. Pinned here so the 6-hourly CI rebuild keeps them; delete an
+ * entry when the docs table adds it. Endpoints stay explicit.
+ *
+ * Verified additions (probed 2026-09-20):
+ *   - muse-spark-1.2-contributor-free → openai-responses (muse family, same
+ *     shape as muse-spark-1.3-contributor-free).
+ * Note: deepseek-v4-flash-free worked in earlier probes but returned 400
+ * "Model is unavailable" on re-verification — left out until it's stable.
+ */
+const KNOWN_FREE_ALIASES = [
+	{
+		id: "muse-spark-1.2-contributor-free",
+		name: "Muse Spark 1.2 Free",
+		endpoint: "https://opencode.ai/zen/v1/responses",
+	},
+];
+
 // ─── Step 3: Enrich with models.dev metadata ─────────────────────────────────
 
 function enrichWithMetadata(freeIds, devSlice) {
@@ -319,6 +339,13 @@ async function main() {
 	// Identify free models: -free suffix or big-pickle
 	const freeModels = allModels.filter(isFreeModel);
 	console.error(`🆓 Identified ${freeModels.length} free models`);
+
+	// Merge verified-but-undocumented aliases (deduped against the docs rows).
+	const added = KNOWN_FREE_ALIASES.filter((k) => !freeModels.some((f) => f.id === k.id));
+	if (added.length > 0) {
+		freeModels.push(...added);
+		console.error(`✅ Added ${added.length} verified undocumented free model(s)`);
+	}
 
 	if (freeModels.length === 0) {
 		console.error("⚠️  No free models found — docs format may have changed");
