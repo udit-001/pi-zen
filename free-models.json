@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-09-21T17:42:36.932Z",
+	"generatedAt": "2026-09-21T21:36:03.741Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 7,
+	"count": 8,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "1.18.31",
 	"models": [
@@ -37,6 +37,32 @@
 			"reasoning": true,
 			"input": [
 				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 32000,
+			"compat": {
+				"maxTokensField": "max_tokens",
+				"supportsStore": false,
+				"supportsReasoningEffort": true,
+				"supportsDeveloperRole": false,
+				"supportsUsageInStreaming": false,
+				"requiresReasoningContentOnAssistantMessages": true
+			}
+		},
+		{
+			"id": "mimo-v2.6-flash-free",
+			"name": "MiMo-V2.6-Flash Free",
+			"api": "openai-completions",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0,
