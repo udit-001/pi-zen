@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-09-24T02:47:48.368Z",
+	"generatedAt": "2026-09-24T10:58:12.851Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 9,
 	"defaultModel": "big-pickle",
