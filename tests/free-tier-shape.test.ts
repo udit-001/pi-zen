@@ -10,6 +10,7 @@ import { test } from "node:test";
 import {
 	ensureZenFreeTierShape,
 	sanitizeZenResponsesItems,
+	shapeZenPayload,
 	ZEN_FREE_TIER_DECOY_TOOL_NAMES,
 } from "../shared.ts";
 
@@ -169,4 +170,58 @@ test("unknown family defaults to the chat-completions shape", () => {
 
 test("the decoy name constant is exactly bash + read", () => {
 	assert.deepEqual(ZEN_FREE_TIER_DECOY_TOOL_NAMES, ["bash", "read"]);
+});
+
+// ─── shapeZenPayload (compaction path) ──────────────────────────────────────
+//
+// pi's compaction requests bypass before_provider_request (no onPayload on
+// that path), so the session_before_compact handler shapes its own payload
+// through this helper. These tests pin the two things it layers on top of
+// ensureZenFreeTierShape: cache-field stripping and the model-id → api lookup.
+
+const apiLookup = {
+	get: (id: string) =>
+		({ "big-pickle": "openai-completions", "muse-spark": "openai-responses" })[id] as never,
+};
+
+test("shapeZenPayload: strips pi cache fields then stands in decoys", () => {
+	const payload: JsonObj = {
+		model: "big-pickle",
+		messages: [],
+		stream: true,
+		prompt_cache_key: "ses_x",
+		prompt_cache_retention: "24h",
+	};
+	const result = shapeZenPayload(payload, apiLookup);
+	assert.notEqual(result, undefined);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.strictEqual(payload.tool_choice, "none");
+	assert.strictEqual("prompt_cache_key" in payload, false);
+	assert.strictEqual("prompt_cache_retention" in payload, false);
+	// same-reference contract, like ensureZenFreeTierShape
+	assert.strictEqual(result!.payload, payload);
+});
+
+test("shapeZenPayload: unknown model id defaults to the chat shape", () => {
+	const payload: JsonObj = { model: "some-unregistered-model", messages: [], stream: true };
+	const result = shapeZenPayload(payload, { get: () => undefined });
+	assert.notEqual(result, undefined);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+});
+
+test("shapeZenPayload: complete real tools pass through with cache fields still stripped", () => {
+	const payload: JsonObj = {
+		model: "big-pickle",
+		tools: [chatTool("bash"), chatTool("read")],
+		prompt_cache_key: "ses_x",
+	};
+	assert.strictEqual(shapeZenPayload(payload, apiLookup), undefined);
+	assert.strictEqual(payload.tools.length, 2);
+	assert.strictEqual("prompt_cache_key" in payload, false);
+});
+
+test("shapeZenPayload: non-object payloads return undefined untouched", () => {
+	assert.strictEqual(shapeZenPayload("nope", apiLookup), undefined);
+	assert.strictEqual(shapeZenPayload(null, apiLookup), undefined);
+	assert.strictEqual(shapeZenPayload([1, 2], apiLookup), undefined);
 });

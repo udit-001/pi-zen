@@ -1,4 +1,20 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+// Runtime imports — pi's extension loader aliases both packages to the running
+// pi instance's own copies, so this never double-loads the agent (see
+// loadExtensions' alias map in pi's extensions/loader). `compact` reuses pi's
+// entire compaction pipeline; only the wire shape differs (see the
+// session_before_compact handler below). pi-ai resolves via /compat: that's
+// both the loader's alias target for the bare specifier and the only export
+// surface with streamSimple.
+import { compact } from "@earendil-works/pi-coding-agent";
+import {
+	streamSimple,
+	type AssistantMessageEventStream,
+	type Context,
+	type Model,
+	type ProviderHeaders,
+	type SimpleStreamOptions,
+} from "@earendil-works/pi-ai/compat";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -11,13 +27,13 @@ import type {
 	ZenModelConfig,
 } from "./shared.js";
 import {
-	ensureZenFreeTierShape,
 	fromFreeModelEntry,
 	humanize,
 	opencodeId,
 	opencodeIdFromSeed,
 	opencodeUserAgent,
 	projectIdFromRemote,
+	shapeZenPayload,
 	validateFreeModelsFile,
 	validOpencodeVersion,
 } from "./shared.js";
@@ -750,6 +766,60 @@ function zenFreeTierFriendlyError(msg: FailedAssistantMessage): string | undefin
 	].join("\n");
 }
 
+// ─── Compaction shaping ───────────────────────────────────────────────────────
+//
+// pi's compaction (manual /compact, threshold auto-compact, overflow recovery)
+// does NOT go through before_provider_request: it calls the provider directly
+// (agent-session → compact() → completeSummarization) with no `onPayload`, and
+// its request context carries no tools at all — the serialized conversation is
+// one user message under SUMMARIZATION_SYSTEM_PROMPT. A compaction call on a
+// free model therefore went out streaming but tool-less, and Zen's gate answered
+// 403 FreeTierError: compaction always failed on pi-zen while normal turns worked.
+//
+// Plugin-side fix: intercept session_before_compact (pi fires it on both the
+// manual and auto paths before its own compact() would run) and run pi's own
+// exported compact() ourselves with a stream fn that calls pi-ai's streamSimple
+// with `onPayload` wired to shapeZenPayload. Everything else — prompts,
+// conversation serialization, cut points, retry, file-op details — stays pi's
+// stock logic; only the wire shape is repaired, and pi records the compaction
+// exactly like a native one (fromExtension). The opencode identity headers are
+// merged here too: the before_provider_headers hook lives inside the agent's
+// stream fn, which a standalone call doesn't pass through.
+
+type ZenStreamFn = (
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) => Promise<AssistantMessageEventStream>;
+
+/**
+ * Stream fn for the compaction call: pi-ai's streamSimple with the opencode
+ * identity headers and the free-tier payload shape applied via `onPayload`.
+ *
+ * Error modes callers must know:
+ * - Decoy tool calls CANNOT be blocked here — the tool_call hook only guards
+ *   agent-loop turns, and this is a standalone call. The chat-completions
+ *   family's `tool_choice: "none"` is the guard; on the anthropic family a
+ *   stray decoy call surfaces as pi's stock "Summarization attempted to call
+ *   a tool" failure.
+ * - Any throw propagates to the session_before_compact handler, which hands
+ *   control back to pi (see its catch).
+ */
+function zenCompactionStreamFn(sessionId: string, authHeaders: ProviderHeaders | undefined): ZenStreamFn {
+	return async (model, context, options) =>
+		streamSimple(model, context, {
+			...options,
+			headers: {
+				...(authHeaders ?? {}),
+				...(options?.headers ?? {}),
+				"x-opencode-session": sessionId,
+				"x-opencode-request": nextRequestId(),
+			},
+			onPayload: (payload: unknown) =>
+				shapeZenPayload(payload, apiByModelId)?.payload ?? payload,
+		});
+}
+
 // ─── Extension Entry ─────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
@@ -839,22 +909,14 @@ export default async function (pi: ExtensionAPI) {
 	// responses, or anthropic wrapper). Unregistered ids — other providers —
 	// get the default chat-completions shape.
 	pi.on("before_provider_request", (event, ctx) => {
-		const payload = event?.payload;
-		if (!payload || typeof payload !== "object") return;
-		const obj = payload as Record<string, unknown>;
-		delete obj.prompt_cache_key;
-		delete obj.prompt_cache_retention;
-		const shaped = ensureZenFreeTierShape(
-			obj,
-			typeof obj.model === "string" ? apiByModelId.get(obj.model) : undefined,
-		);
+		const shaped = shapeZenPayload(event?.payload, apiByModelId);
 		const key = sessionIdFor(ctx);
 		if (shaped) {
 			inFlightDecoys.set(key, shaped.shouldBlock);
 			return shaped.payload;
 		}
 		inFlightDecoys.delete(key);
-		return obj;
+		return event?.payload;
 	});
 
 	// The `bash`/`read` decoys exist only to satisfy that shape. If the model
@@ -882,6 +944,38 @@ export default async function (pi: ExtensionAPI) {
 		const friendly = zenFreeTierFriendlyError(msg) ?? zenQuotaFriendlyError(msg);
 		if (!friendly) return;
 		return { message: { ...msg, errorMessage: friendly } };
+	});
+
+	// Compaction on a pi-zen model: run pi's own compact() with the free-tier
+	// wire shape applied (see the Compaction shaping block above for why this
+	// hook exists). Non-Zen sessions fall through untouched.
+	pi.on("session_before_compact", async (event, ctx) => {
+		const model = ctx.model;
+		if (!model || model.provider !== PROVIDER_ID) return undefined;
+
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return undefined;
+
+		try {
+			const compaction = await compact(
+				event.preparation,
+				model,
+				auth.apiKey,
+				undefined, // headers are merged inside the stream fn
+				event.customInstructions,
+				event.signal,
+				ctx.thinkingLevel,
+				zenCompactionStreamFn(sessionIdFor(ctx), auth.headers),
+				auth.env,
+			);
+			return { compaction };
+		} catch {
+			// Hand the decision back to pi instead of masking the failure: its own
+			// attempt re-runs compaction and surfaces the stock error path (including
+			// session_compact_failed) rather than us inventing new semantics. An
+			// aborted signal aborts pi's attempt the same way.
+			return undefined;
+		}
 	});
 
 	// ─── Commands ────────────────────────────────────────────────────────────

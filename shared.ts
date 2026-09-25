@@ -572,3 +572,26 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenDec
 	obj.tools = [...tools, ...appended];
 	return { payload: obj, shouldBlock: decoyBlocker(missing) };
 }
+
+/** Where a payload's endpoint family comes from: the registered-model map. */
+export type ZenApiLookup = Pick<Map<string, ModelApi>, "get">;
+
+/**
+ * One shape pass over a provider request payload: drop OpenAI-only cache
+ * fields Zen may reject, then apply ensureZenFreeTierShape. Pure apart from
+ * mutating the payload object in place (same contract as ensureZenFreeTierShape
+ * — callers get the same reference back).
+ *
+ * Two callers share this: the `before_provider_request` hook (agent-loop
+ * turns) and the compaction stream fn in index.ts — pi's compaction requests
+ * bypass `before_provider_request` (they call the provider with no `onPayload`),
+ * so the session_before_compact handler has to shape its own payload.
+ */
+export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenDecoyInjection | undefined {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
+	const obj = payload as Record<string, unknown>;
+	delete obj.prompt_cache_key;
+	delete obj.prompt_cache_retention;
+	const api = typeof obj.model === "string" ? apiLookup.get(obj.model) : undefined;
+	return ensureZenFreeTierShape(obj, api) ?? undefined;
+}
