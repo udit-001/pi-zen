@@ -17,6 +17,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { apiForEndpoint } from "./zen-endpoints.mjs";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -26,21 +27,10 @@ const MODELS_DEV_URL = "https://models.dev/api.json";
 const OPENCODE_NPM_URL = "https://registry.npmjs.org/opencode-ai/latest";
 const FETCH_TIMEOUT_MS = 15_000;
 
-// Docs endpoint → pi api family. Free models are not all OpenAI-compatible:
-// stealth models can be served over Anthropic Messages or the Responses API.
-const API_BY_ENDPOINT = [
-	{ pattern: /:stream?[gG]enerateContent/, api: "google-generative-ai" },
-	{ pattern: /\/responses\/?$/, api: "openai-responses" },
-	{ pattern: /\/messages\/?$/, api: "anthropic-messages" },
-];
-
-/** pi's api for a Zen endpoint; the OpenAI-compatible chat route is the default. */
-function apiForEndpoint(endpoint) {
-	for (const { pattern, api } of API_BY_ENDPOINT) {
-		if (pattern.test(endpoint ?? "")) return api;
-	}
-	return "openai-completions";
-}
+// Endpoint → pi api family lives in ./zen-endpoints.mjs (shared with the
+// endpoint-family tests). It throws on an unrecognized endpoint: a new Zen
+// route must be mapped there explicitly rather than silently entering the
+// picker as a chat model.
 
 // ─── Args ────────────────────────────────────────────────────────────────────
 
@@ -221,12 +211,16 @@ function enrichWithMetadata(freeIds, devSlice) {
 		const context = meta?.limit?.context;
 		const output = meta?.limit?.output;
 		const hasImage = Array.isArray(meta?.modalities?.input) && meta.modalities.input.includes("image");
-		const api = apiForEndpoint(entry.endpoint);
+		const api = apiForEndpoint(entry.endpoint, entry.id);
 
 		models.push({
 			id: entry.id,
 			name: meta?.name || entry.name || humanize(entry.id),
 			api,
+			// The real endpoint URL, kept alongside the family it was mapped to:
+			// `api` says how to talk to it, `endpoint` says where. Both survive to
+			// registration so a model can be wired to its exact route later.
+			endpoint: entry.endpoint,
 			reasoning,
 			thinkingLevelMap: buildThinkingLevelMap(meta),
 			input: hasImage ? ["text", "image"] : ["text"],

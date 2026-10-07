@@ -33,6 +33,7 @@ import {
 	opencodeIdFromSeed,
 	opencodeUserAgent,
 	projectIdFromRemote,
+	isSpeakableApi,
 	shapeZenPayload,
 	validateFreeModelsFile,
 	validOpencodeVersion,
@@ -595,10 +596,17 @@ async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 
 // ─── Provider Registration ───────────────────────────────────────────────────
 
-function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]) {
+function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
 	// The endpoint family is per model (see file header); everything shared —
 	// baseUrl, credential, headers — stays here. Provider-level `api` is the
 	// default family for any model that omits one.
+	//
+	// Hold back families pi has no wire client for — today that is
+	// `systemone` (Jev), Zen's structured-evaluation protocol on
+	// /zen/v1/systemone, which answers typed questions rather than chat turns.
+	// Registering it would offer a model that fails on its first request; the
+	// curated list keeps its `endpoint` either way, so pi's Jev support only
+	// has to flip its family to speakable in shared.ts.
 	//
 	// Pass a concrete key when one exists (stored credential or env). A concrete
 	// value marks the provider "configured" synchronously at registration — which
@@ -610,7 +618,8 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]) {
 	// when it has no key, which Zen maps to anonymous (IP-rate-limited) access to
 	// the free models. Forwarding an unresolved "$ZEN_API_KEY" would instead be
 	// read as a literal credential and rejected.
-	apiByModelId = new Map(models.map((m) => [m.id, m.api ?? "openai-completions"]));
+	const speakable = models.filter((m) => isSpeakableApi(m.api));
+	apiByModelId = new Map(speakable.map((m) => [m.id, m.api ?? "openai-completions"]));
 	pi.registerProvider(PROVIDER_ID, {
 		name: PROVIDER_NAME,
 		baseUrl: BASE_URL,
@@ -619,15 +628,15 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]) {
 		api: "openai-completions",
 		// opencode-CLI headers (User-Agent + x-opencode-*), see opencodeHeaders().
 		headers: opencodeHeaders(),
-		models,
+		models: speakable,
 	});
+	return speakable.length;
 }
 
 /** Always register something: the resolved list, or the last-known-good. */
 async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
 	const models = await resolveOrRecover();
-	registerProvider(pi, models);
-	return models.length;
+	return registerProvider(pi, models);
 }
 
 /**

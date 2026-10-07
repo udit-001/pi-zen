@@ -23,20 +23,51 @@ export const ZEN_PROVIDER_ID = "pi-zen";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-/** pi API families Zen serves. Determines which endpoint/model config pi uses. */
+/**
+ * pi API families Zen serves. Determines which endpoint/model config pi uses.
+ * Not all of them have a client in pi — see isSpeakableApi below.
+ */
 export type ModelApi =
 	| "openai-completions"
 	| "openai-responses"
 	| "anthropic-messages"
-	| "google-generative-ai";
+	| "google-generative-ai"
+	| "systemone";
 
-/** The ModelApi values we accept from the curated list. */
-export const MODEL_APIS: ReadonlySet<string> = new Set<ModelApi>([
-	"openai-completions",
-	"openai-responses",
-	"anthropic-messages",
-	"google-generative-ai",
-]);
+/**
+ * Every family, in one record keyed by ModelApi: adding a family is one line
+ * here, and forgetting it is a type error rather than a model that silently
+ * passes validation and then fails to register. The two facts callers need
+ * — may the curated list carry this family, may the picker register it — are
+ * derived from this record, never re-stated.
+ *
+ * `speakable: false` for `systemone` (Jev, TypeSafe AI): Zen serves it on
+ * /zen/v1/systemone, a structured-evaluation protocol that answers typed
+ * questions with values and probabilities — not chat turns, so pi has no wire
+ * client for it. Flip it to `true` when pi ships a SystemOne client; the
+ * curated list already carries each model's `endpoint`, so no other file
+ * changes. See registerProvider in index.ts for the filter this drives.
+ */
+const API_FAMILIES: Readonly<Record<ModelApi, { speakable: boolean }>> = {
+	"openai-completions": { speakable: true },
+	"openai-responses": { speakable: true },
+	"anthropic-messages": { speakable: true },
+	"google-generative-ai": { speakable: true },
+	systemone: { speakable: false },
+};
+
+/** May the curated list carry this family? (Type guard for the validator.) */
+export function acceptsCuratedApi(api: string): api is ModelApi {
+	return Object.prototype.hasOwnProperty.call(API_FAMILIES, api);
+}
+
+/**
+ * May the picker register a model on this family? `undefined` means
+ * openai-completions — the family a model without an `api` field gets.
+ */
+export function isSpeakableApi(api: ModelApi | undefined): boolean {
+	return API_FAMILIES[api ?? "openai-completions"].speakable;
+}
 
 /** Pi's thinking-level map: maps level names to model-specific values or null (hidden). */
 export type ThinkingLevelMap = Partial<
@@ -67,6 +98,12 @@ export type FreeModelEntry = {
 	name: string;
 	/** Endpoint family from the Zen docs table. Absent = openai-completions. */
 	api?: ModelApi;
+	/**
+	 * Absolute endpoint URL this model is served on, carried verbatim from the
+	 * docs table — the raw source `api` was derived from. Absent only in lists
+	 * generated before this field existed.
+	 */
+	endpoint?: string;
 	reasoning: boolean;
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
@@ -90,7 +127,7 @@ export type FreeModelsFile = {
 /**
  * pi's model config — the output of all resolution paths. `api` names the
  * endpoint family this model is served on; it is set per model (not on the
- * provider) because Zen free models span three families, while auth, base
+ * provider) because Zen free models span several families, while auth, base
  * URL, and headers stay shared at the provider level.
  */
 export type ZenModelConfig = {
@@ -98,6 +135,8 @@ export type ZenModelConfig = {
 	name: string;
 	/** Endpoint family to reach this model on Zen. Absent = openai-completions. */
 	api?: ModelApi;
+	/** Exact endpoint URL, when the curated list carried one. */
+	endpoint?: string;
 	reasoning: boolean;
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
@@ -174,6 +213,7 @@ export function fromFreeModelEntry(entry: FreeModelEntry): ZenModelConfig {
 		id: entry.id,
 		name: entry.name,
 		api: entry.api,
+		endpoint: entry.endpoint,
 		reasoning: entry.reasoning,
 		thinkingLevelMap: entry.thinkingLevelMap,
 		input: entry.input,
@@ -201,7 +241,13 @@ export function validateFreeModelsFile(data: unknown): data is FreeModelsFile {
 		if (typeof m !== "object" || m === null) return false;
 		if (typeof m.id !== "string" || !m.id) return false;
 		if (typeof m.name !== "string") return false;
-		if (m.api !== undefined && (typeof m.api !== "string" || !MODEL_APIS.has(m.api))) return false;
+		if (m.api !== undefined && (typeof m.api !== "string" || !acceptsCuratedApi(m.api))) return false;
+		if (
+			m.endpoint !== undefined &&
+			(typeof m.endpoint !== "string" || !/^https?:\/\//.test(m.endpoint))
+		) {
+			return false;
+		}
 		if (typeof m.reasoning !== "boolean") return false;
 		if (!Array.isArray(m.input) || m.input.length === 0) return false;
 		if (typeof m.contextWindow !== "number" || m.contextWindow <= 0) return false;

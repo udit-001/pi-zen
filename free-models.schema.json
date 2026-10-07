@@ -50,8 +50,13 @@
 				},
 				"api": {
 					"type": "string",
-					"enum": ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"],
+					"enum": ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai", "systemone"],
 					"description": "pi api family for this model's Zen endpoint (absent = openai-completions)"
+				},
+				"endpoint": {
+					"type": "string",
+					"format": "uri",
+					"description": "Absolute Zen endpoint URL this model is served on; the api family is derived from it at build time. Absent only in lists generated before this field existed."
 				},
 				"reasoning": {
 					"type": "boolean",

@@ -19,6 +19,7 @@ No extra commands — pi's `/model` and `/login` do everything.
 - **No premature compaction** — pi sizes sessions to the model's real context window.
 - **A thinking picker that tells the truth** — low/high/max appear only when the model accepts them.
 - **Free means free** — only models on Zen's free tier enter the picker.
+- **No phantom models** — a model whose protocol pi can't speak yet (Zen's SystemOne/Jev) stays out of the picker instead of failing on every request; the list still carries its real endpoint, so pi's future client picks it up with no rebuild.
 - **Self-updating** — the model list refreshes itself; updates land without reinstalling.
 
 ## Env (optional)
