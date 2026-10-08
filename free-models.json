@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-08T12:40:25.818Z",
+	"generatedAt": "2026-10-08T22:45:46.565Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 13,
 	"defaultModel": "big-pickle",
@@ -115,16 +115,16 @@
 			}
 		},
 		{
-			"id": "exo-free",
-			"name": "Exo Free",
+			"id": "step-5-preview-free",
+			"name": "Step 5 Preview Free",
 			"api": "openai-completions",
 			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
 				"minimal": null,
-				"low": null,
-				"medium": null,
+				"low": "low",
+				"medium": "medium",
 				"high": "high",
 				"xhigh": null,
 				"max": null
@@ -139,30 +139,31 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
-			"maxTokens": 131072,
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
 			"compat": {
 				"maxTokensField": "max_tokens",
 				"supportsStore": false,
 				"supportsReasoningEffort": true,
 				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false
+				"supportsUsageInStreaming": false,
+				"requiresReasoningContentOnAssistantMessages": true
 			}
 		},
 		{
-			"id": "fledge-alpha-free",
-			"name": "Fledge Alpha Free",
+			"id": "exo-free",
+			"name": "Exo Free",
 			"api": "openai-completions",
 			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
 				"minimal": null,
-				"low": "low",
+				"low": null,
 				"medium": null,
 				"high": "high",
 				"xhigh": null,
-				"max": "max"
+				"max": null
 			},
 			"input": [
 				"text",
