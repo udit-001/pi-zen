@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-12T03:56:10.496Z",
+	"generatedAt": "2026-10-13T13:23:15.810Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 13,
+	"count": 14,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "1.19.0",
 	"models": [
@@ -10,7 +10,7 @@
 			"id": "jev-1.13-free",
 			"name": "Jev 1.13 Free",
 			"api": "systemone",
-			"endpoint": "https://opencode.ai/zen/v1/systemone",
+			"endpoint": "https://opencode.ai/inference/v1/systemone",
 			"reasoning": false,
 			"input": [
 				"text"
@@ -29,7 +29,7 @@
 			"id": "big-pickle",
 			"name": "Big Pickle",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -55,7 +55,7 @@
 			"id": "space-bunny-free",
 			"name": "Space Bunny Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
@@ -88,10 +88,45 @@
 			}
 		},
 		{
+			"id": "cat-jam-free",
+			"name": "Cat Jam Free",
+			"api": "openai-completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"off": null,
+				"minimal": null,
+				"low": "low",
+				"medium": "medium",
+				"high": "high",
+				"xhigh": "xhigh",
+				"max": "max"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {
+				"maxTokensField": "max_tokens",
+				"supportsStore": false,
+				"supportsReasoningEffort": true,
+				"supportsDeveloperRole": false,
+				"supportsUsageInStreaming": false,
+				"requiresReasoningContentOnAssistantMessages": true
+			}
+		},
+		{
 			"id": "longcat-2.5-preview-free",
 			"name": "LongCat 2.5 Preview Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -118,7 +153,7 @@
 			"id": "step-5-preview-free",
 			"name": "Step 5 Preview Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
@@ -154,7 +189,7 @@
 			"id": "exo-free",
 			"name": "Exo Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
@@ -189,7 +224,7 @@
 			"id": "mimo-v2.6-flash-free",
 			"name": "MiMo-V2.6-Flash Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -216,7 +251,7 @@
 			"id": "mimo-v2.5-free",
 			"name": "MiMo V2.5 Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -243,7 +278,7 @@
 			"id": "ling-3.1-flash-free",
 			"name": "Ling 3.1 Flash Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -268,7 +303,7 @@
 			"id": "ling-3.0-flash-fin-free",
 			"name": "Ling 3.0 Flash Fin Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -293,7 +328,7 @@
 			"id": "nemotron-3-ultra-free",
 			"name": "Nemotron 3 Ultra Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -319,7 +354,7 @@
 			"id": "nemotron-3.5-lightning-free",
 			"name": "Nemotron 3.5 Lightning Free",
 			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/zen/v1/chat/completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
 			"reasoning": true,
 			"input": [
 				"text"
