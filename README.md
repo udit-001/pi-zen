@@ -1,5 +1,7 @@
 # pi-zen
 
+[![Free-tier canary](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fudit-001%2Fpi-zen%2Fdata%2Fcanary-badge.json)](https://github.com/udit-001/pi-zen/actions/workflows/canary.yml)
+
 Free [OpenCode Zen](https://opencode.ai/zen) models for [pi](https://github.com/earendil-works/pi-coding-agent) — install, paste a key, pick a model. The model list stays current without reinstalling.
 
 ## Install

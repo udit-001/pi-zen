@@ -1,0 +1,69 @@
+name: Zen free-tier canary
+
+# The regression class unit tests cannot catch: Zen changes its free-tier wire
+# gate (session-id shape, decoy tool names, headers) and every test stays green
+# while the extension starts answering 403. This probes the live endpoint daily
+# with the exact recipe the extension ships (scripts/canary.mjs).
+#
+# Outputs, every run (pass or fail):
+#   - exit code: fail = 1 -> GitHub emails watchers (the alert channel).
+#   - canary-status.json on the data branch: the machine-readable verdict the
+#     extension consults before registering the free models (a fail keeps them
+#     out of the /model picker and replaces the session-start message with one
+#     honest warning).
+#   - a commit on the data branch: the daily activity that keeps this schedule
+#     from GitHub's 60-day no-activity auto-disable (same class as the
+#     update-free-models commits).
+#
+# The default branch is never touched: users of the published package must not
+# see a phantom update every day. Public status lives in a README badge
+# (workflows/canary.yml run status) instead.
+#
+# Notification channel is GitHub's own: failed runs email watchers by default
+# (github.com -> Settings -> Notifications -> Actions). No webhook logic here.
+on:
+  schedule:
+    - cron: "23 7 * * *"   # daily 07:23 UTC — offset from update-free-models (x0)
+  workflow_dispatch:        # manual trigger, e.g. right after a gate fix
+
+permissions:
+  contents: write           # push canary-status.json to the data branch
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Probe the live free tier
+        run: node scripts/canary.mjs "$RUNNER_TEMP"
+
+      # always(): a FAILED run must still publish its status and stamp activity
+      # — that is exactly when the extension needs the verdict and the schedule
+      # must stay enabled so tomorrow's probe can confirm recovery.
+      - name: Publish canary status to the data branch
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/canary-status.json" || { echo "no status files (probe crashed before writing)"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Same pattern as update-free-models.yml: data is a machine branch
+          # holding only generated JSON; create it as an orphan if missing.
+          if git fetch origin data:data; then
+            git checkout data
+          else
+            git checkout --orphan data
+            git rm -rf . 2>/dev/null || true
+          fi
+          cp "$RUNNER_TEMP/canary-status.json" "$RUNNER_TEMP/canary-badge.json" .
+          git add canary-status.json canary-badge.json
+          if git diff --cached --quiet; then
+            echo "Verdict unchanged — skipping commit"
+            exit 0
+          fi
+          git commit -m "chore: canary status [skip ci]"
+          git push origin data

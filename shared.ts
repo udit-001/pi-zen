@@ -1,9 +1,10 @@
 /**
  * Shared types and pure helpers for pi-zen.
  *
- * No dependencies on pi's ExtensionAPI and no I/O — consumed by both:
+ * No dependencies on pi's ExtensionAPI and no I/O — consumed by:
  *   - index.ts (the extension)
  *   - build-free-models.mjs (the GitHub Action, via its own copies of the helpers)
+ *   - scripts/canary.mjs (the live free-tier probe)
  *
  * The helpers here are the single source of truth for the logic they encode.
  * The build script duplicates them because it runs in a plain Node context
@@ -417,6 +418,81 @@ function remoteParts(host: string, name: string): string | undefined {
 export function projectIdFromRemote(remoteUrl: string): string | undefined {
 	const normalized = normalizeGitRemote(remoteUrl);
 	return normalized ? createHash("sha1").update(`git-remote:${normalized}`).digest("hex") : undefined;
+}
+
+// ─── Zen canary ─────────────────────────────────────────────────────────────
+//
+// The canary (scripts/canary.mjs, run daily by .github/workflows/canary.yml)
+// is the authority on whether the shipped wire recipe still passes Zen's
+// free-tier gate. Two consumers read its output:
+//
+//   - canaryVerdict: the workflow's exit code -> GitHub emails on failure.
+//   - canaryHealth:  the extension's registration gate. The verdict is
+//     committed as canary-status.json on the data branch; a broken verdict
+//     keeps the free models OUT of the /model picker and replaces the
+//     session-start message with one honest warning, instead of letting
+//     every turn fail with a raw 403.
+//
+// Freshness policy: a verdict older than CANARY_STALE_MS (or a missing /
+// malformed status file) is "unknown" — absence of evidence is not breakage,
+// so the models register and behave exactly as today; the in-session 403 copy
+// still catches real breakage in that window. "inconclusive" (all-429) is
+// likewise not breakage: no evidence either way.
+
+/** Age past which a canary verdict is stale enough to distrust. */
+export const CANARY_STALE_MS = 48 * 60 * 60 * 1000;
+
+/** Shape of canary-status.json as the canary writes it (scripts/canary.mjs). */
+export type CanaryStatus = {
+	verdict: string;
+	checkedAt: string;
+	probed: string[];
+};
+
+/** The extension's belief about the bridge, derived from a canary status. */
+export type CanaryHealth = "healthy" | "broken" | "unknown";
+
+/**
+ * Classify a canary status for the registration gate. Pure: the caller owns
+ * fetching (index.ts) and the test owns the clock.
+ */
+export function canaryHealth(status: unknown, now: number): CanaryHealth {
+	if (typeof status !== "object" || status === null) return "unknown";
+	const { verdict, checkedAt } = status as Record<string, unknown>;
+	if (typeof verdict !== "string" || typeof checkedAt !== "string") return "unknown";
+	if (verdict !== "pass" && verdict !== "fail" && verdict !== "inconclusive") return "unknown";
+	const checked = Date.parse(checkedAt);
+	if (!Number.isFinite(checked)) return "unknown";
+	if (now - checked > CANARY_STALE_MS) return "unknown";
+	return verdict === "fail" ? "broken" : "healthy";
+}
+
+// ─── Canary run verdict ─────────────────────────────────────────────────────
+//
+// The alert policy for scripts/canary.mjs, the daily live probe of the
+// free-tier gate (the regression class unit tests cannot catch — the Oct 2026
+// 403 arrived with every test green). Classification, pure so tests can pin
+// it (tests/canary-verdict.test.ts):
+//
+//   "pass"          — at least one candidate served with the shipped recipe
+//   "inconclusive"  — every candidate rate-limited (429): anonymous access is
+//                     IP-limited and CI runners share IPs, so rate limiting
+//                     is not evidence of a gate change. Paging on this would
+//                     train the user to ignore alerts.
+//   "fail"          — 403 on every candidate (gate changed upstream) or any
+//                     other status across the board (Zen-side failure)
+//
+// A single "pass" settles it: candidates exist so one delisted model does not
+// page anyone.
+
+/**
+ * Classify a canary run from its per-candidate HTTP statuses (-1 = network
+ * error). Consumed by scripts/canary.mjs; the workflow sees only its exit code.
+ */
+export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fail" {
+	if (statuses.includes(200)) return "pass";
+	if (statuses.every((s) => s === 429)) return "inconclusive";
+	return "fail";
 }
 
 // ─── Zen free-tier request shape ────────────────────────────────────────────

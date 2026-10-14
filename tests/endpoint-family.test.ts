@@ -137,7 +137,8 @@ test("index.ts registers models through isSpeakableApi", () => {
 	// index.ts imports "./shared.js", which only pi's loader resolves, so
 	// node --test cannot import it — same honest source check the
 	// headless-exit regression test uses. Pins the filter that keeps a
-	// non-speakable family out of the picker.
+	// non-speakable family out of the picker (applied to the models that
+	// survive the bridge-health gate; see registerProvider).
 	const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-	assert.match(source, /models\.filter\(\(m\) => isSpeakableApi\(m\.api\)\)/);
+	assert.match(source, /modelsToRegister\.filter\(\(m\) => isSpeakableApi\(m\.api\)\)/);
 });

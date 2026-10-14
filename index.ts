@@ -27,6 +27,9 @@ import type {
 	ZenModelConfig,
 } from "./shared.js";
 import {
+	canaryHealth,
+	type CanaryHealth,
+	type CanaryStatus,
 	fromFreeModelEntry,
 	humanize,
 	opencodeId,
@@ -118,6 +121,13 @@ const MODELS_URL = `${BASE_URL}/models`;
 // extension never needs to fetch models.dev at runtime.
 const FREE_MODELS_CDN_URL =
 	"https://cdn.jsdelivr.net/gh/udit-001/pi-zen@data/free-models.json";
+// Canary verdict (scripts/canary.mjs, committed daily to the data branch by
+// .github/workflows/canary.yml). The registration gate reads it: a fresh
+// "fail" keeps the free models out of the picker and replaces the
+// session-start message with one honest warning. Missing or stale reads as
+// "unknown" — a paused canary must not silently disable the extension.
+const CANARY_STATUS_CDN_URL =
+	"https://cdn.jsdelivr.net/gh/udit-001/pi-zen@data/canary-status.json";
 
 // Zen's live list is tiny — refresh aggressively. The curated free-models.json
 // is served stale-while-revalidate: the TTL only decides when a background
@@ -126,6 +136,9 @@ const FREE_MODELS_CDN_URL =
 // polling is effectively free.
 const MODEL_CACHE_TTL_MS = 60_000;
 const FREE_MODELS_CDN_TTL_MS = 3_600_000;
+// The canary verdict changes at most daily; one fetch per hour per process is
+// generous. Sessions are shorter than the 48 h staleness window either way.
+const CANARY_STATUS_TTL_MS = 3_600_000;
 const FETCH_TIMEOUT_MS = 8_000;
 
 // ─── opencode parity (pi → Zen requests look like opencode requests) ────────
@@ -427,6 +440,47 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
 }
 
 /**
+ * Bridge health: the canary's latest verdict, TTL-cached, never throws.
+ *
+ * Returns the health the extension should act on RIGHT NOW — re-derived from
+ * the cached status with the current clock, so a cached verdict ages into
+ * "unknown" at the 48 h boundary even without a refetch. A failed or
+ * non-OK fetch keeps any previous cache (last-known-good, like the model
+ * list) or yields "unknown" when there is none.
+ *
+ * Ordering contract: call before re-registering. The synchronous first
+ * registration at extension load deliberately runs on the default "unknown"
+ * — the network must not delay registration (session-model restore checks
+ * immediately), and the async refresh below re-registers with a real verdict
+ * moments later, before any request can happen.
+ */
+let canaryStatusCache: { expiresAt: number; status: CanaryStatus | undefined } | null = null;
+let bridgeHealth: CanaryHealth = "unknown";
+
+async function fetchBridgeHealth(): Promise<CanaryHealth> {
+	if (canaryStatusCache && canaryStatusCache.expiresAt > Date.now()) {
+		return canaryHealth(canaryStatusCache.status, Date.now());
+	}
+	try {
+		const res = await fetch(CANARY_STATUS_CDN_URL, {
+			headers: { Accept: "application/json" },
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		});
+		if (res.ok) {
+			const data: unknown = await res.json();
+			canaryStatusCache = {
+				expiresAt: Date.now() + CANARY_STATUS_TTL_MS,
+				status: typeof data === "object" && data !== null ? (data as CanaryStatus) : undefined,
+			};
+		}
+		// Non-OK (404 = canary never ran): keep the previous cache, else unknown.
+	} catch {
+		// Network failure: keep the previous cache, else unknown.
+	}
+	return canaryHealth(canaryStatusCache?.status, Date.now());
+}
+
+/**
  * Curated free-model list from the data branch (maintained by GitHub Action).
  * Contains full model metadata — no runtime models.dev join required.
  *
@@ -617,6 +671,15 @@ async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 // ─── Provider Registration ───────────────────────────────────────────────────
 
 function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
+	// ── Bridge-health gate ──
+	// A fresh canary "fail" means the shipped wire recipe no longer passes
+	// Zen's free-tier gate — registering the models would only offer turns
+	// that fail. Hide them instead: the provider keeps its identity (a saved
+	// session model degrades gracefully) but offers nothing, and
+	// session_start tells the user why. "unknown" (no/stale status, fetch
+	// failure) registers normally — absence of evidence is not breakage, and
+	// the in-session 403 copy covers that window.
+	const modelsToRegister = bridgeHealth === "broken" ? [] : models;
 	// The endpoint family is per model (see file header); everything shared —
 	// baseUrl, credential, headers — stays here. Provider-level `api` is the
 	// default family for any model that omits one.
@@ -638,7 +701,7 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
 	// when it has no key, which Zen maps to anonymous (IP-rate-limited) access to
 	// the free models. Forwarding an unresolved "$ZEN_API_KEY" would instead be
 	// read as a literal credential and rejected.
-	const speakable = models.filter((m) => isSpeakableApi(m.api));
+	const speakable = modelsToRegister.filter((m) => isSpeakableApi(m.api));
 	apiByModelId = new Map(speakable.map((m) => [m.id, m.api ?? "openai-completions"]));
 	pi.registerProvider(PROVIDER_ID, {
 		name: PROVIDER_NAME,
@@ -655,6 +718,9 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
 
 /** Always register something: the resolved list, or the last-known-good. */
 async function refreshAndRegister(pi: ExtensionAPI): Promise<number> {
+	// Health first, so the registration below gates on a verdict fetched this
+	// cycle (not one cached from a previous session).
+	bridgeHealth = await fetchBridgeHealth();
 	const models = await resolveOrRecover();
 	return registerProvider(pi, models);
 }
@@ -736,13 +802,22 @@ function zenQuotaFriendlyError(msg: FailedAssistantMessage): string | undefined 
 	].join("\n");
 }
 
-// Zen's free tier also rejects a request outright (403) when it doesn't look
-// like an agent turn — it must stream and carry tools. pi-zen guarantees that
-// shape (ensureZenFreeTierShape), so a 403 here means the network's anonymous
-// allowance is spent rather than a malformed request; a key moves the caller
-// onto its own quota. Same wording constraints as the quota message above:
-// no pi RETRYABLE markers (429 / rate limit / too many requests / try ... again
-// / timeout) — the text says "usage limit" instead.
+// Zen's free tier also rejects a request outright with 403 FreeTierError.
+// The old reading here — "the anonymous allowance is spent" — was inference,
+// and the Oct 2026 breakage disproved it: a perfectly-shaped request 403'd
+// because pi-zen's session-id scheme had rotted. Zen's own error taxonomy
+// draws the line we now encode: 429 FreeUsageLimitError = quota (recoverable
+// by waiting / a key); 403 FreeTierError = the request failed the gate check
+// ("free tier can only be used from within OpenCode") = OUR integration no
+// longer looks like opencode traffic. That is maintainer-side breakage — the
+// daily canary detects it and hides the models; a live-session turn that
+// slips between canary runs gets the copy below instead.
+//
+// Wording: Focus + pitch — diagnosis first, no mechanism, no dead-end
+// recovery (no fix may exist yet, so "update" is only true once the fix
+// ships). No pi RETRYABLE markers (429 / rate limit / try again / 5xx ...);
+// "403" and "FreeTierError" are not on the retryable list, so the plain
+// statement cannot trigger pi's auto-retry loop.
 const ZEN_FREE_TIER_ERROR_PATTERN = /FreeTierError|free tier can only be used/i;
 
 /**
@@ -753,14 +828,8 @@ function zenFreeTierFriendlyError(msg: FailedAssistantMessage): string | undefin
 	if (msg.stopReason !== "error" || msg.provider !== PROVIDER_ID) return undefined;
 	if (!msg.errorMessage || !ZEN_FREE_TIER_ERROR_PATTERN.test(msg.errorMessage)) return undefined;
 	return [
-		`Zen refused this free-tier request for "${msg.model}" (403 FreeTierError).`,
-		"",
-		"Free models are served anonymously only up to a shared per-network usage limit.",
-		"",
-		"Fix (best first):",
-		`1. /login ${PROVIDER_ID} -> free key, gives you your own quota`,
-		"2. /model -> pick another free model",
-		"3. Wait for the reset (timing varies)",
+		`pi-zen: "${msg.model}" failed. The free service is not accepting pi-zen right now; it is not your quota or key.`,
+		"Use another model for now (/model). It clears on its own once pi-zen ships a fix.",
 	].join("\n");
 }
 
@@ -876,6 +945,20 @@ export default async function (pi: ExtensionAPI) {
 		applyFreeModelsIfChanged(pi, knownAt);
 
 		if (!ctx.hasUI) return;
+
+		if (bridgeHealth === "broken") {
+			// The one startup slot, state-dependent: the broken warning REPLACES
+			// the ready message — the same place always answers "what is
+			// pi-zen's state right now". Wording per Focus + pitch: diagnosis
+			// first, blame-free, the one real user action, no mechanism, no
+			// dead-end "update" instruction (no fix may exist yet).
+			ctx.ui.notify(
+				"pi-zen: free models hidden. The free service is not accepting pi-zen right now; nothing on your side fixes it.\n" +
+					"Use another model for now (/model). They return on their own once pi-zen ships a fix.",
+				"warning",
+			);
+			return;
+		}
 
 		if (!getApiKey()) {
 			// No key still works: we authenticate as opencode does when signed out
