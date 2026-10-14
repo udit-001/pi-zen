@@ -204,11 +204,32 @@ test("shapeZenPayload: strips pi cache fields then stands in decoys", () => {
 	assert.strictEqual(result!.payload, payload);
 });
 
-test("shapeZenPayload: unknown model id defaults to the chat shape", () => {
-	const payload: JsonObj = { model: "some-unregistered-model", messages: [], stream: true };
-	const result = shapeZenPayload(payload, { get: () => undefined });
-	assert.notEqual(result, undefined);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
+test("shapeZenPayload: foreign model id passes through untouched (Responses regression)", () => {
+	// gpt-6.1-sol on OpenAI Responses: 19 real flat tools must survive intact —
+	// the chat-completions default used to append nested {function:{name}}
+	// decoys here and OpenAI 400'd on tools[19].name.
+	const realTool = { type: "function", name: "web_search", parameters: { type: "object" } };
+	const toolsPayload: JsonObj = {
+		model: "gpt-6.1-sol",
+		stream: true,
+		store: true,
+		tools: Array.from({ length: 19 }, (_, i) => ({ ...realTool, name: `tool_${i}` })),
+		prompt_cache_key: "ses_foreign",
+	};
+	assert.strictEqual(shapeZenPayload(toolsPayload, { get: () => undefined }), undefined);
+	assert.strictEqual(toolsPayload.tools.length, 19);
+	assert.strictEqual((toolsPayload.tools as JsonObj[])[0]!.name, "tool_0");
+	assert.strictEqual("prompt_cache_key" in toolsPayload, true); // untouched, cache fields included
+
+	// Tool-less foreign payload: no decoys injected, no tool_choice forced.
+	const toolLessPayload: JsonObj = { model: "gpt-6.1-sol", stream: true, input: [] };
+	assert.strictEqual(shapeZenPayload(toolLessPayload, { get: () => undefined }), undefined);
+	assert.strictEqual("tools" in toolLessPayload, false);
+
+	// Foreign chat-completions payload: no tool_choice injected.
+	const chatPayload: JsonObj = { model: "some-unregistered-model", messages: [], stream: true };
+	assert.strictEqual(shapeZenPayload(chatPayload, { get: () => undefined }), undefined);
+	assert.strictEqual("tool_choice" in chatPayload, false);
 });
 
 test("shapeZenPayload: complete real tools pass through with cache fields still stripped", () => {

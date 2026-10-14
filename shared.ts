@@ -722,8 +722,15 @@ export type ZenApiLookup = Pick<Map<string, ModelApi>, "get">;
 export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenDecoyInjection | undefined {
 	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
 	const obj = payload as Record<string, unknown>;
+	// Gate on model id FIRST: only shape payloads for models we registered.
+	// The before_provider_request event is global — it fires for every
+	// provider — and an unregistered id used to fall through to the
+	// chat-completions default, injecting chat-shaped decoys into foreign
+	// payloads (a Responses-API model then 400s on tools[i].name). A foreign
+	// payload must pass through untouched, cache fields included.
+	const api = typeof obj.model === "string" ? apiLookup.get(obj.model) : undefined;
+	if (api === undefined) return undefined;
 	delete obj.prompt_cache_key;
 	delete obj.prompt_cache_retention;
-	const api = typeof obj.model === "string" ? apiLookup.get(obj.model) : undefined;
 	return ensureZenFreeTierShape(obj, api) ?? undefined;
 }

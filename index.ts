@@ -1005,7 +1005,9 @@ export default async function (pi: ExtensionAPI) {
 	// The payload carries the model id, so apiByModelId resolves the endpoint
 	// family and with it the decoy tools' wire shape (chat-completions,
 	// responses, or anthropic wrapper). Unregistered ids — other providers —
-	// get the default chat-completions shape.
+	// pass through untouched: shaping a foreign payload in the wrong wire
+	// shape (e.g. chat-shaped decoys on a Responses payload) makes the other
+	// provider's request 400. See shapeZenPayload in shared.ts.
 	pi.on("before_provider_request", (event, ctx) => {
 		const shaped = shapeZenPayload(event?.payload, apiByModelId);
 		const key = sessionIdFor(ctx);
