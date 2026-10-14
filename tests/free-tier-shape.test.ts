@@ -31,24 +31,25 @@ const chatTool = (name: string) => ({
 	function: { name, description: "x", parameters: { type: "object", properties: {} } },
 });
 
-test("chat tool-less turn: stands in bash/read decoys + tool_choice none", () => {
+test("chat tool-less turn: stands in the file-search quartet + tool_choice none", () => {
 	const payload: JsonObj = { model: "big-pickle", messages: [], stream: true };
 	const result = ensureZenFreeTierShape(payload, "openai-completions");
 	assert.notEqual(result, null);
 	assert.strictEqual(result!.payload, payload); // same reference back
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 	assert.strictEqual(payload.tool_choice, "none");
 	assert.strictEqual(result!.shouldBlock("bash"), true);
 	assert.strictEqual(result!.shouldBlock("read"), true);
+	assert.strictEqual(result!.shouldBlock("glob"), true);
 	assert.strictEqual(result!.shouldBlock("edit"), false);
 });
 
-test("chat with real pi tools: untouched, returns null", () => {
+test("chat with real pi tools covering the quartet: untouched, returns null", () => {
 	const payload: JsonObj = {
 		model: "big-pickle",
 		messages: [],
 		stream: true,
-		tools: [chatTool("bash"), chatTool("read"), chatTool("edit"), chatTool("write")],
+		tools: [chatTool("bash"), chatTool("glob"), chatTool("grep"), chatTool("read"), chatTool("edit"), chatTool("write")],
 	};
 	const before = JSON.stringify(payload);
 	assert.strictEqual(ensureZenFreeTierShape(payload, "openai-completions"), null);
@@ -65,9 +66,10 @@ test("chat tools missing a decoy name: only the missing one appended, tool_choic
 	};
 	const result = ensureZenFreeTierShape(payload, "openai-completions");
 	assert.notEqual(result, null);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "edit", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "edit", "glob", "grep", "read"]);
 	assert.strictEqual(payload.tool_choice, "auto");
 	assert.strictEqual(result!.shouldBlock("read"), true);
+	assert.strictEqual(result!.shouldBlock("glob"), true);
 	assert.strictEqual(result!.shouldBlock("bash"), false); // bash was a real tool
 	assert.strictEqual(result!.shouldBlock("edit"), false);
 });
@@ -76,7 +78,7 @@ test("responses tool-less turn: flat decoys + store:false, no tool_choice forcin
 	const payload: JsonObj = { model: "muse-spark-1.3-contributor-free", input: [], stream: true };
 	const result = ensureZenFreeTierShape(payload, "openai-responses");
 	assert.notEqual(result, null);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 	assert.strictEqual(payload.store, false);
 	assert.strictEqual(payload.tool_choice, undefined);
 	assert.strictEqual(result!.shouldBlock("bash"), true);
@@ -143,7 +145,7 @@ test("anthropic tool-less turn: flat anthropic decoys, no tool_choice forcing", 
 	const payload: JsonObj = { model: "union-alpha", messages: [], stream: true };
 	const result = ensureZenFreeTierShape(payload, "anthropic-messages");
 	assert.notEqual(result, null);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 	assert.strictEqual(payload.tool_choice, undefined);
 });
 
@@ -164,12 +166,12 @@ test("unknown family defaults to the chat-completions shape", () => {
 	const payload: JsonObj = { model: "other-provider-model", messages: [], stream: true };
 	const result = ensureZenFreeTierShape(payload, undefined);
 	assert.notEqual(result, null);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 	assert.strictEqual(payload.tool_choice, "none");
 });
 
-test("the decoy name constant is exactly bash + read", () => {
-	assert.deepEqual(ZEN_FREE_TIER_DECOY_TOOL_NAMES, ["bash", "read"]);
+test("the decoy name constant is exactly the file-search quartet", () => {
+	assert.deepEqual(ZEN_FREE_TIER_DECOY_TOOL_NAMES, ["bash", "glob", "grep", "read"]);
 });
 
 // ─── shapeZenPayload (compaction path) ──────────────────────────────────────
@@ -194,7 +196,7 @@ test("shapeZenPayload: strips pi cache fields then stands in decoys", () => {
 	};
 	const result = shapeZenPayload(payload, apiLookup);
 	assert.notEqual(result, undefined);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 	assert.strictEqual(payload.tool_choice, "none");
 	assert.strictEqual("prompt_cache_key" in payload, false);
 	assert.strictEqual("prompt_cache_retention" in payload, false);
@@ -206,17 +208,17 @@ test("shapeZenPayload: unknown model id defaults to the chat shape", () => {
 	const payload: JsonObj = { model: "some-unregistered-model", messages: [], stream: true };
 	const result = shapeZenPayload(payload, { get: () => undefined });
 	assert.notEqual(result, undefined);
-	assert.deepEqual(toolNamesOf(payload), ["bash", "read"]);
+	assert.deepEqual(toolNamesOf(payload), ["bash", "glob", "grep", "read"]);
 });
 
 test("shapeZenPayload: complete real tools pass through with cache fields still stripped", () => {
 	const payload: JsonObj = {
 		model: "big-pickle",
-		tools: [chatTool("bash"), chatTool("read")],
+		tools: [chatTool("bash"), chatTool("glob"), chatTool("grep"), chatTool("read")],
 		prompt_cache_key: "ses_x",
 	};
 	assert.strictEqual(shapeZenPayload(payload, apiLookup), undefined);
-	assert.strictEqual(payload.tools.length, 2);
+	assert.strictEqual(payload.tools.length, 4);
 	assert.strictEqual("prompt_cache_key" in payload, false);
 });
 

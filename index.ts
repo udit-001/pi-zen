@@ -30,7 +30,6 @@ import {
 	fromFreeModelEntry,
 	humanize,
 	opencodeId,
-	opencodeIdFromSeed,
 	opencodeUserAgent,
 	projectIdFromRemote,
 	isSpeakableApi,
@@ -91,12 +90,17 @@ import {
 //   x-opencode-request
 //
 // Zen's free tier additionally requires an *agent-shaped* request: it serves a
-// free model only when the call streams and the `tools` array carries both
-// `bash` AND `read` (the model must look like real opencode traffic), otherwise
-// it answers 403 (`FreeTierError`). pi streams always, but it omits `tools`
-// for tool-less turns — so we stand in `bash`/`read` decoy tools that must
-// never be called, the same cloak 9router ships (see ensureZenFreeTierShape in
+// free model only when the call streams and the `tools` array carries the
+// file-search quartet `bash` `glob` `grep` `read`, lowercase (the model must
+// look like real opencode traffic), otherwise it answers 403
+// (`FreeTierError`). pi streams always, but it omits `tools` for tool-less
+// turns — so we stand in the quartet as decoy tools that must never be
+// called, the same cloak 9router ships (see ensureZenFreeTierShape in
 // shared.ts, verified against the live endpoint).
+//
+// The `x-opencode-session` id must additionally carry a *plausible timestamp*
+// in its 12 hex chars: hash-derived ids decode to garbage and draw 403
+// (verified live Oct 2026 — see sessionIdFor).
 
 const PROVIDER_ID = ZEN_PROVIDER_ID;
 const PROVIDER_NAME = "OpenCode Zen (Free)";
@@ -201,10 +205,10 @@ let apiByModelId: ReadonlyMap<string, ModelApi> = new Map();
  * Session id → `shouldBlock` predicate returned by the session's most recent
  * provider request. The tool_call hook consults it to decide whether a call is
  * a decoy — and only decoys: the predicate returns true for exactly the
- * `bash`/`read` decoys that request stood in, never for pi's real tools (pi
- * registers its own `bash`/`read` on genuine tool turns). Keyed by session
+ * `bash`/`glob`/`grep`/`read` decoys that request stood in, never for pi's real tools (pi
+ * registers its own tools on genuine turns). Keyed by session
  * (not a global boolean) so interleaved sessions never cross-block. Cleared
- * when a request needs no injection (its `bash`/`read` are real tools now).
+ * when a request needs no injection (its quartet names are real tools now).
  */
 const inFlightDecoys = new Map<string, (toolName: string) => boolean>();
 
@@ -339,18 +343,34 @@ function resolveProjectId(): string {
 }
 
 /**
- * `ses_...` for the current pi session: deterministic from pi's session id, so
- * reconnects in the same conversation keep Zen's sticky routing/cache warm.
- * Falls back to a per-process id before a session exists.
+ * `ses_...` for the current pi session, stable across requests so Zen's sticky
+ * routing and prompt cache stay warm within one conversation.
+ *
+ * The id must carry a *plausible epoch-ms timestamp* in its 12 hex chars.
+ * Verified live (Oct 2026): a ses_ whose time field derives from a hash of the
+ * session id — pi-zen's previous opencodeIdFromSeed scheme, borrowed from
+ * 9router's translateSessionId — draws 403 FreeTierError, while any real
+ * timestamp passes (7 days old verified 200). Zen evidently decodes the field
+ * and rejects values that are not a plausible ms-since-epoch. So the id is
+ * minted from Date.now() — the same scheme as 9router's generateSessionId —
+ * exactly once per pi session and cached; sessions never outlive the
+ * timestamp's validity (tested to 7 days).
  */
+const sessionIds = new Map<string, string>();
+
 function sessionIdFor(ctx: ExtensionContext): string {
+	let key = "";
 	try {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (sessionId) return opencodeIdFromSeed("ses", sessionId);
+		if (sessionId) key = sessionId;
 	} catch {
 		// No session manager in this context — use the process-wide id.
 	}
-	return FALLBACK_SESSION_ID;
+	const cached = sessionIds.get(key);
+	if (cached) return cached;
+	const id = opencodeId("ses", Date.now(), 0, randomBytes(14));
+	sessionIds.set(key, id);
+	return id;
 }
 
 /** One `msg_...` per provider request, in opencode's ascending id format. */
@@ -885,15 +905,15 @@ export default async function (pi: ExtensionAPI) {
 	//   1. drop OpenAI-only cache fields the Zen gateway may reject
 	//   2. guarantee the request shape Zen's free tier requires (see
 	//      ensureZenFreeTierShape) — the gate is `stream` + a `tools` array that
-	//      contains both `bash` and `read`, and pi omits `tools` on tool-less
-	//      turns (and sends `[]` when replaying tool history)
+	//      contains the file-search quartet (bash/glob/grep/read), and pi omits
+	//      `tools` on tool-less turns (and sends `[]` when replaying tool history)
 	//
 	// Scope: applied to every provider's payload, not just our own. Forced by
 	// pi's event interface — before_provider_request carries only
 	// `{ type, payload }`, no headers, so there is nothing to gate on here (the
 	// isZenRequest gate lives on the headers event instead). Harm is bounded:
 	// unknown payload fields are stripped by the api clients anyway, and a
-	// non-Zen provider only ever sees the `bash`/`read` decoys on tool-less
+	// non-Zen provider only ever sees the quartet decoys on tool-less
 	// turns — where the model is told they are unavailable, chat-completions
 	// also gets `tool_choice: "none"` (responses gets `store: false` + `"auto"`
 	// + a reasoning-item sweep), and any stray call is blocked harmlessly by
@@ -914,10 +934,10 @@ export default async function (pi: ExtensionAPI) {
 		return event?.payload;
 	});
 
-	// The `bash`/`read` decoys exist only to satisfy that shape. If the model
+	// The decoy tools exist only to satisfy that shape. If the model
 	// calls one anyway, block it with a readable result instead of letting the
 	// turn die on an unknown tool — but ONLY when this session's in-flight
-	// request actually stands them in: pi's own real `bash`/`read` tools must
+	// request actually stands them in: pi's own real tools must
 	// keep running untouched on normal tool turns.
 	pi.on("tool_call", (event, ctx) => {
 		const shouldBlock = inFlightDecoys.get(sessionIdFor(ctx));

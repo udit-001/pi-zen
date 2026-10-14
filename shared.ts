@@ -380,17 +380,6 @@ export function opencodeId(
 }
 
 /**
- * Deterministic opencode-shaped id derived from a seed. Same wire shape as
- * opencodeId, but stable for a given seed — used to pin pi's session id to an
- * opencode-shaped `ses_...` that survives reconnects (Zen keys its sticky
- * provider routing and prompt cache on the session id).
- */
-export function opencodeIdFromSeed(prefix: "ses" | "msg", seed: string): string {
-	const digest = createHash("sha1").update(seed).digest();
-	return `${prefix}_${formatOpencodeIdBody(digest.subarray(0, 6), digest.subarray(6, 20))}`;
-}
-
-/**
  * Normalize a git remote URL the way opencode does (`url()` + `parts()`):
  * `https://github.com/foo/bar.git` and `git@github.com:foo/bar` both become
  * `github.com/foo/bar`.
@@ -433,9 +422,10 @@ export function projectIdFromRemote(remoteUrl: string): string | undefined {
 // ─── Zen free-tier request shape ────────────────────────────────────────────
 //
 // Zen serves its free models only to requests that look like an agent turn.
-// Verified against the live endpoint (Sep 2026), the gate is:
+// Verified against the live endpoint (Sep 2026, re-probed Oct 2026), the gate is:
 //
-//   stream:true  AND  tools containing BOTH the names "bash" AND "read"
+//   stream:true  AND  tools containing the file-search quartet
+//                    "bash" "glob" "grep" "read" (lowercase)
 //
 // plus a `User-Agent` carrying opencode/>=1.17 and an `x-opencode-session`
 // matching /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/ (both satisfied by the header
@@ -443,8 +433,10 @@ export function projectIdFromRemote(remoteUrl: string): string | undefined {
 // `FreeTierError: OpenCode's free tier can only be used from within OpenCode`.
 // In particular the tool names must literally be present: a single arbitrary
 // placeholder (pi-zen's previous `_zen_noop`), only one of the two names, or a
-// pi-style custom tool all draw the 403, while decoys named `bash` + `read`
-// are accepted. This is the same cloak 9router ships (open-sse/executors/
+// pi-style custom tool all draw the 403. 9router's Oct 2026 probes additionally
+// found case variants (`Bash`) rejected as duplicates and requests missing any
+// of the four names 403ing even with the other three present — hence the full
+// quartet below, not a subset. This is the same cloak 9router ships (open-sse/executors/
 // opencode.js, "fix free tier 403 error" — PR/commit 93837af).
 //
 // pi omits `tools` for tool-less turns (and sends `[]` when replaying tool
@@ -470,37 +462,46 @@ export function projectIdFromRemote(remoteUrl: string): string | undefined {
 // The wire wrapper differs per family — chat-completions nests under
 // `function`, responses and anthropic are flat.
 
-/** The two tool names Zen's free tier literally requires in `tools`. */
-export const ZEN_FREE_TIER_DECOY_TOOL_NAMES = ["bash", "read"] as const;
+/**
+ * The tool names Zen's free tier requires in `tools`: opencode's file-search
+ * quartet, lowercase. 9router's Oct 2026 probes (open-sse/utils/
+ * opencodeFingerprint.js) found requests without all four drawing 403
+ * FreeTierError, and case variants (`Bash`) count as duplicates and are
+ * rejected upstream — irrelevant here, pi's tool names are already lowercase.
+ */
+export const ZEN_FREE_TIER_DECOY_TOOL_NAMES = ["bash", "glob", "grep", "read"] as const;
 
 const ZEN_DECOY_DESCRIPTION =
 	"This tool is currently unavailable and must not be used. Do not call it, and do not mention it.";
 
 /** Chat-completions wrapper: `{ type: "function", function: { name, ... } }`. */
-export const ZEN_FREE_TIER_DECOY_TOOLS = [
-	{ type: "function", function: { name: "bash", description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } } },
-	{ type: "function", function: { name: "read", description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } } },
-];
+const ZEN_FREE_TIER_DECOY_TOOLS = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
+	type: "function",
+	function: { name, description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } },
+}));
 
 /** Responses-API wrapper: flat `{ type, name, description, parameters }`. */
-const ZEN_FREE_TIER_DECOY_TOOLS_RESPONSES = [
-	{ type: "function", name: "bash", description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } },
-	{ type: "function", name: "read", description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } },
-];
+const ZEN_FREE_TIER_DECOY_TOOLS_RESPONSES = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
+	type: "function",
+	name,
+	description: ZEN_DECOY_DESCRIPTION,
+	parameters: { type: "object", properties: {} },
+}));
 
 /** Anthropic-messages wrapper: flat `{ name, description, input_schema }`. */
-const ZEN_FREE_TIER_DECOY_TOOLS_ANTHROPIC = [
-	{ name: "bash", description: ZEN_DECOY_DESCRIPTION, input_schema: { type: "object", properties: {} } },
-	{ name: "read", description: ZEN_DECOY_DESCRIPTION, input_schema: { type: "object", properties: {} } },
-];
+const ZEN_FREE_TIER_DECOY_TOOLS_ANTHROPIC = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
+	name,
+	description: ZEN_DECOY_DESCRIPTION,
+	input_schema: { type: "object", properties: {} },
+}));
 
 /**
  * Result of shaping a request for Zen's free tier: the (mutated) payload plus a
  * predicate answering "is this tool call a decoy that must be blocked?" for
  * exactly the names this call stood in. Null when nothing was injected — the
- * payload already carried real `bash`/`read` tools, or was passed through
+ * payload already carried the full quartet as real tools, or was passed through
  * untouched (google family / non-object payloads). The predicate never matches
- * real tools: pi registers its own `bash`/`read`, so blanket blocking by name
+ * real tools: pi registers its own tools, so blanket blocking by name
  * would break genuine tool turns.
  */
 export type ZenDecoyInjection = {
@@ -542,7 +543,7 @@ export function sanitizeZenResponsesItems(payload: Record<string, unknown>): voi
 /**
  * Internal: build the `shouldBlock` predicate for the decoy names a call stood
  * in. Closes over exactly the names injected by that call, so real pi tools
- * (which share the `bash`/`read` names on genuine tool turns) are never
+ * (which share those names on genuine tool turns) are never
  * matched.
  */
 function decoyBlocker(names: readonly string[]): (toolName: string) => boolean {
@@ -551,17 +552,18 @@ function decoyBlocker(names: readonly string[]): (toolName: string) => boolean {
 
 /**
  * Guarantee the request shape Zen's free tier requires: a `tools` array that
- * contains both `bash` and `read`. Shapes `payload` in place and returns the
+ * contains the full file-search quartet (see ZEN_FREE_TIER_DECOY_TOOL_NAMES).
+ * Shapes `payload` in place and returns the
  * same reference plus a `shouldBlock` predicate covering exactly the decoy
  * names this call stood in; returns `null` when nothing was needed (the
- * payload already carries real `bash`/`read`, is not a plain request object,
+ * payload already carries the full quartet, is not a plain request object,
  * or the family is skipped).
  *
  * - No tools / empty `tools` → stand in BOTH decoys; on chat-completions (and
  *   unknown families, which default to its shape) force `tool_choice: "none"`
  *   (when absent) so the model cannot call a decoy it was told is unavailable.
  * - `tools` present but missing a decoy name → append the missing ones
- *   (mirrors 9router; keeps the gate green for tool sets that omit bash/read);
+ *   (mirrors 9router; keeps the gate green for tool sets missing quartet names);
  *   `tool_choice` is left untouched — pi's own choice governs real tools.
  * - Responses family (muse-spark) additionally gets `store: false`, a
  *   `tool_choice` coerced to `"auto"` (the only value upstream accepts), and
