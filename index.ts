@@ -35,6 +35,7 @@ import {
 	opencodeId,
 	opencodeUserAgent,
 	projectIdFromRemote,
+	resolveCanaryStatus,
 	isSpeakableApi,
 	shapeZenPayload,
 	type ZenShapedRequest,
@@ -134,6 +135,11 @@ const FREE_MODELS_CDN_URL =
 // "unknown" — a paused canary must not silently disable the extension.
 const CANARY_STATUS_CDN_URL =
 	"https://cdn.jsdelivr.net/gh/udit-001/pi-zen@data/canary-status.json";
+// Freshness arbiter for the same file (resolveCanaryStatus arbitrates when
+// the two disagree): raw.githubusercontent serves through a Fastly edge with
+// max-age=300 — at most ~5 min stale, against jsdelivr's up-to-12 h.
+const CANARY_STATUS_ORIGIN_URL =
+	"https://raw.githubusercontent.com/udit-001/pi-zen/data/canary-status.json";
 
 // Zen's live list is tiny — refresh aggressively. The curated free-models.json
 // is served stale-while-revalidate: the TTL only decides when a background
@@ -458,9 +464,11 @@ async function fetchZenModels(force = false): Promise<ZenModel[]> {
  *
  * Returns the health the extension should act on RIGHT NOW — re-derived from
  * the cached status with the current clock, so a cached verdict ages into
- * "unknown" at the 48 h boundary even without a refetch. A failed or
- * non-OK fetch keeps any previous cache (last-known-good, like the model
- * list) or yields "unknown" when there is none.
+ * "unknown" at the 48 h boundary even without a refetch. Each refresh reads
+ * both mirrors of canary-status.json (jsdelivr + raw.githubusercontent) and
+ * lets resolveCanaryStatus pick the trustworthy one; a failed read on BOTH
+ * keeps any previous cache (last-known-good, like the model list) or yields
+ * "unknown" when there is none.
  *
  * Ordering contract: call before re-registering. The synchronous first
  * registration at extension load deliberately runs on the default "unknown"
@@ -475,23 +483,35 @@ async function fetchBridgeHealth(): Promise<CanaryHealth> {
 	if (canaryStatusCache && canaryStatusCache.expiresAt > Date.now()) {
 		return canaryHealth(canaryStatusCache.status, Date.now());
 	}
-	try {
-		const res = await fetch(CANARY_STATUS_CDN_URL, {
-			headers: { Accept: "application/json" },
-			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-		});
-		if (res.ok) {
-			const data: unknown = await res.json();
-			canaryStatusCache = {
-				expiresAt: Date.now() + CANARY_STATUS_TTL_MS,
-				status: typeof data === "object" && data !== null ? (data as CanaryStatus) : undefined,
-			};
-		}
-		// Non-OK (404 = canary never ran): keep the previous cache, else unknown.
-	} catch {
-		// Network failure: keep the previous cache, else unknown.
+	// Both mirrors in parallel; a failed read leaves a clean undefined and
+	// resolveCanaryStatus owns the trust policy.
+	const [cdn, origin] = await Promise.allSettled([
+		fetchCanaryJson(CANARY_STATUS_CDN_URL),
+		fetchCanaryJson(CANARY_STATUS_ORIGIN_URL),
+	]);
+	const mirrorStatus = cdn.status === "fulfilled" ? cdn.value : undefined;
+	const originStatus = origin.status === "fulfilled" ? origin.value : undefined;
+	if (mirrorStatus !== undefined || originStatus !== undefined) {
+		canaryStatusCache = {
+			expiresAt: Date.now() + CANARY_STATUS_TTL_MS,
+			status: resolveCanaryStatus(mirrorStatus, originStatus, Date.now()) as
+				| CanaryStatus
+				| undefined,
+		};
 	}
+	// Both reads failed or returned unparseable bodies: keep the previous
+	// cache (last-known-good), else unknown.
 	return canaryHealth(canaryStatusCache?.status, Date.now());
+}
+
+/** GET a URL and parse the body as JSON; any failure resolves to undefined. */
+async function fetchCanaryJson(url: string): Promise<unknown> {
+	const res = await fetch(url, {
+		headers: { Accept: "application/json" },
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+	});
+	if (!res.ok) return undefined; // 404 = canary never ran
+	return res.json();
 }
 
 /**

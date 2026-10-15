@@ -458,15 +458,52 @@ export type CanaryHealth = "healthy" | "broken" | "unknown";
  * Classify a canary status for the registration gate. Pure: the caller owns
  * fetching (index.ts) and the test owns the clock.
  */
-export function canaryHealth(status: unknown, now: number): CanaryHealth {
-	if (typeof status !== "object" || status === null) return "unknown";
+/**
+ * A canary status that passed the shape + freshness gate, or undefined.
+ * Internal: the one definition of a usable read, shared by canaryHealth and
+ * resolveCanaryStatus so the two can never disagree about what "fresh" means.
+ */
+function asFreshCanaryStatus(
+	status: unknown,
+	now: number,
+): { checkedAt: string; verdict: "fail" | "inconclusive" | "pass" } | undefined {
+	if (typeof status !== "object" || status === null) return undefined;
 	const { verdict, checkedAt } = status as Record<string, unknown>;
-	if (typeof verdict !== "string" || typeof checkedAt !== "string") return "unknown";
-	if (verdict !== "pass" && verdict !== "fail" && verdict !== "inconclusive") return "unknown";
+	if (typeof verdict !== "string" || typeof checkedAt !== "string") return undefined;
+	if (verdict !== "pass" && verdict !== "fail" && verdict !== "inconclusive") return undefined;
 	const checked = Date.parse(checkedAt);
-	if (!Number.isFinite(checked)) return "unknown";
-	if (now - checked > CANARY_STALE_MS) return "unknown";
-	return verdict === "fail" ? "broken" : "healthy";
+	if (!Number.isFinite(checked)) return undefined;
+	if (now - checked > CANARY_STALE_MS) return undefined;
+	return { verdict, checkedAt };
+}
+
+export function canaryHealth(status: unknown, now: number): CanaryHealth {
+	const fresh = asFreshCanaryStatus(status, now);
+	if (!fresh) return "unknown";
+	return fresh.verdict === "fail" ? "broken" : "healthy";
+}
+
+/**
+ * Pick the canary status the registration gate should trust when the two
+ * mirrors of canary-status.json disagree.
+ *
+ * The file lives on the data branch and reaches the extension through two
+ * caches with very different lag: the jsDelivr edge (up to 12 h stale until
+ * its purge API fires) and raw.githubusercontent.com (Fastly, max-age=300 —
+ * at most ~5 min stale). On differing verdicts the origin read is the
+ * fresher evidence: the mirror can pin a dead "fail" for half a day after
+ * the free tier recovered (Oct 2026 — the gate hid the models for hours
+ * after the canary had re-passed) or a dead "pass" after a real gate change.
+ * A stale or unusable origin read defers to the mirror untouched, and the
+ * returned status still goes through canaryHealth, so this never publishes
+ * a verdict the gate would call "unknown". Pure: the caller owns fetching.
+ */
+export function resolveCanaryStatus(mirror: unknown, origin: unknown, now: number): unknown {
+	const fromMirror = asFreshCanaryStatus(mirror, now);
+	const fromOrigin = asFreshCanaryStatus(origin, now);
+	if (!fromOrigin) return mirror;
+	if (!fromMirror) return origin;
+	return fromMirror.verdict === fromOrigin.verdict ? mirror : origin;
 }
 
 // ─── Canary run verdict ─────────────────────────────────────────────────────
