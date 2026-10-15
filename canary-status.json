@@ -1,9 +1,7 @@
 {
-	"verdict": "fail",
-	"checkedAt": "2026-10-15T12:41:43.025Z",
+	"verdict": "pass",
+	"checkedAt": "2026-10-15T19:15:01.233Z",
 	"probed": [
-		"big-pickle",
-		"space-bunny-free",
-		"longcat-2.5-preview-free"
+		"big-pickle"
 	]
 }
