@@ -37,6 +37,7 @@ import {
 	projectIdFromRemote,
 	isSpeakableApi,
 	shapeZenPayload,
+	type ZenShapedRequest,
 	validateFreeModelsFile,
 	validOpencodeVersion,
 	ZEN_PROVIDER_ID,
@@ -87,33 +88,38 @@ import {
 // IP-rate-limited access to the free models. A key is still recommended: it
 // ties usage to your workspace instead of the shared anonymous bucket.
 //
-// Wire parity with opencode (verified against a live opencode 1.18.31 request;
-// see shared.ts "OpenCode wire parity"):
-//   User-Agent, x-opencode-client, x-opencode-project, x-opencode-session,
-//   x-opencode-request
+// Wire parity with opencode v2 (verified upstream, 9router #4842; see
+// shared.ts "OpenCode wire parity"):
+//   User-Agent (v2 shape: opencode/<channel>/<version>/<client>),
+//   x-opencode-client, x-opencode-project, x-opencode-session,
+//   x-opencode-session-id / x-session-affinity / x-session-id (same value)
 //
 // Zen's free tier additionally requires an *agent-shaped* request: it serves a
-// free model only when the call streams and the `tools` array carries the
-// file-search quartet `bash` `glob` `grep` `read`, lowercase (the model must
-// look like real opencode traffic), otherwise it answers 403
+// free model only when the call streams and the `tools` array carries
+// opencode's own `read` and `shell` tools with their exact v2 definitions (the
+// model must look like real opencode traffic), otherwise it answers 403
 // (`FreeTierError`). pi streams always, but it omits `tools` for tool-less
-// turns — so we stand in the quartet as decoy tools that must never be
-// called, the same cloak 9router ships (see ensureZenFreeTierShape in
-// shared.ts, verified against the live endpoint).
+// turns, and its real tools collide with the fingerprint names — so the
+// shaping pass appends the exact definitions (concealing colliding caller
+// tools under `_client` aliases), the same recipe 9router ships (see
+// ensureZenFreeTierShape in shared.ts).
 //
 // The `x-opencode-session` id must additionally carry a *plausible timestamp*
-// in its 12 hex chars: hash-derived ids decode to garbage and draw 403
-// (verified live Oct 2026 — see sessionIdFor).
+// in its 12 hex chars, with a small per-millisecond counter: hash-derived ids
+// decode to garbage and large counters draw 403 (verified live Oct 2026 —
+// see sessionIdFor and nextRequestId).
 
 const PROVIDER_ID = ZEN_PROVIDER_ID;
 const PROVIDER_NAME = "OpenCode Zen (Free)";
 // Sent when no key is configured: what the opencode CLI sends while signed out.
 // Zen treats it as "no credential" → anonymous free-tier access (IP rate limited).
-// See packages/console/app/src/routes/zen/v1/chat/completions.ts → `key === "public"`.
+// See the opencode console gateway's chat/completions route → `key === "public"`.
 const ZEN_ANONYMOUS_API_KEY = "public";
 // ZEN_BASE_URL override lets you route through a proxy / local gateway (and is
-// handy for testing). MODELS_URL derives from it.
-const BASE_URL = process.env.ZEN_BASE_URL || "https://opencode.ai/zen/v1";
+// handy for testing). MODELS_URL derives from it. The free tier moved from
+// /zen/v1 to /inference/v1 with OpenCode v2 (9router #4842); /zen/v1 now
+// answers every free request with 403 FreeTierError.
+const BASE_URL = process.env.ZEN_BASE_URL || "https://opencode.ai/inference/v1";
 const MODELS_URL = `${BASE_URL}/models`;
 // Curated free-model list — maintained by the GitHub Action in
 // `.github/workflows/update-free-models.yml`, committed to the `data` branch,
@@ -150,12 +156,14 @@ const FETCH_TIMEOUT_MS = 8_000;
 // helpers, this file owns pi-side policy:
 //
 //   User-Agent version   refreshed from free-models.json (the GitHub Action
-//                        records the latest opencode release), so it doesn't
-//                        go stale between extension installs
+//                        records the latest opencode release), clamped by
+//                        validOpencodeVersion so it can never regress into a
+//                        403 — the v2 server rejects v1-shaped UAs outright
 //   x-opencode-project   resolved once from the git remote of the cwd
-//   x-opencode-session   pinned to pi's session id, finalized per request
-//   x-opencode-request   minted fresh per provider request
-const OPENCODE_VERSION_FALLBACK = "1.18.31";
+//   x-opencode-session   pinned to pi's session id, finalized per request;
+//                        also echoed as x-opencode-session-id,
+//                        x-session-affinity and x-session-id (v2 headers —
+//                        v1's x-opencode-request is rejected upstream)
 // The opencode CLI reads its client identity from OPENCODE_CLIENT ("cli" by default).
 const OPENCODE_CLIENT = process.env.OPENCODE_CLIENT || "cli";
 // Process-wide fallback session id, used when no pi session id is available yet.
@@ -202,12 +210,13 @@ let freeModelsRevalidate: Promise<void> | null = null;
 let freeModelsUpdatedAt = 0;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
-/** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped to >= 1.17 (validOpencodeVersion): OpenCode's server rejects lower versions with 403/426. */
-let opencodeVersion = OPENCODE_VERSION_FALLBACK;
+/** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped by validOpencodeVersion: the v2 server rejects v1-shaped UAs with 403 FreeTierError, so anything below major 2 clamps to the pinned verified-good version. */
+let opencodeVersion: string | undefined;
 /** Resolved on first use: the project id opencode would compute for this cwd. */
 let projectId: string | null = null;
-/** Per-millisecond counter for opencode-style ascending ids (matches upstream). */
-let idCounter = 0;
+/** Per-millisecond request counter for opencode-style ascending ids. v2 decodes the counter and rejects values >= ~100 with 403 FreeTierError, so it resets every millisecond and stays tiny (see nextRequestId). */
+let lastRequestMs = 0;
+let msRequestCounter = 0;
 /**
  * Registered model id → endpoint family. before_provider_request carries the
  * model id but no headers, so this map is how the payload hook resolves which
@@ -215,15 +224,15 @@ let idCounter = 0;
  */
 let apiByModelId: ReadonlyMap<string, ModelApi> = new Map();
 /**
- * Session id → `shouldBlock` predicate returned by the session's most recent
- * provider request. The tool_call hook consults it to decide whether a call is
- * a decoy — and only decoys: the predicate returns true for exactly the
- * `bash`/`glob`/`grep`/`read` decoys that request stood in, never for pi's real tools (pi
- * registers its own tools on genuine turns). Keyed by session
- * (not a global boolean) so interleaved sessions never cross-block. Cleared
- * when a request needs no injection (its quartet names are real tools now).
+ * Session id → the ZenShapedRequest returned by the session's most recent
+ * provider request. The tool_call hook consults its shouldBlock (true for
+ * exactly the placeholder tools that request appended — never pi's real
+ * tools), and message_end consults its restoreToolName to map concealed
+ * aliases (`read_client`) back to the caller's names. Keyed by session (not
+ * a global) so interleaved sessions never cross-block. Replaced on every
+ * shaped request.
  */
-const inFlightDecoys = new Map<string, (toolName: string) => boolean>();
+const inFlightShaping = new Map<string, ZenShapedRequest>();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -386,10 +395,15 @@ function sessionIdFor(ctx: ExtensionContext): string {
 	return id;
 }
 
-/** One `msg_...` per provider request, in opencode's ascending id format. */
+/** One `msg_...` per provider request, in opencode's ascending id format. The counter is a real per-millisecond count (v2 rejects large counters with 403 FreeTierError — see opencodeId in shared.ts), so it resets every ms. */
 function nextRequestId(): string {
-	idCounter = (idCounter + 1) % 4096;
-	return opencodeId("msg", Date.now(), idCounter, randomBytes(14));
+	const now = Date.now();
+	if (now !== lastRequestMs) {
+		lastRequestMs = now;
+		msRequestCounter = 0;
+	}
+	msRequestCounter++;
+	return opencodeId("msg", now, msRequestCounter, randomBytes(14));
 }
 
 /**
@@ -686,7 +700,7 @@ function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
 	//
 	// Hold back families pi has no wire client for — today that is
 	// `systemone` (Jev), Zen's structured-evaluation protocol on
-	// /zen/v1/systemone, which answers typed questions rather than chat turns.
+	// /inference/v1/systemone, which answers typed questions rather than chat turns.
 	// Registering it would offer a model that fails on its first request; the
 	// curated list keeps its `endpoint` either way, so pi's Jev support only
 	// has to flip its family to speakable in shared.ts.
@@ -864,11 +878,11 @@ type ZenStreamFn = (
  * identity headers and the free-tier payload shape applied via `onPayload`.
  *
  * Error modes callers must know:
- * - Decoy tool calls CANNOT be blocked here — the tool_call hook only guards
- *   agent-loop turns, and this is a standalone call. The chat-completions
- *   family's `tool_choice: "none"` is the guard; on the anthropic family a
- *   stray decoy call surfaces as pi's stock "Summarization attempted to call
- *   a tool" failure.
+ * - Placeholder tool calls CANNOT be blocked here — the tool_call hook only
+ *   guards agent-loop turns, and this is a standalone call. The system note
+ *   injected by the shaping pass is the guard; on the anthropic family a
+ *   stray placeholder call surfaces as pi's stock "Summarization attempted to
+ *   call a tool" failure.
  * - Any throw propagates to the session_before_compact handler, which hands
  *   control back to pi (see its catch).
  */
@@ -879,8 +893,12 @@ function zenCompactionStreamFn(sessionId: string, authHeaders: ProviderHeaders |
 			headers: {
 				...(authHeaders ?? {}),
 				...(options?.headers ?? {}),
+				// v2 identity: the session value under four names; no
+				// x-opencode-request (v1 header — v2 rejects it with 403).
 				"x-opencode-session": sessionId,
-				"x-opencode-request": nextRequestId(),
+				"x-opencode-session-id": sessionId,
+				"x-session-affinity": sessionId,
+				"x-session-id": sessionId,
 			},
 			onPayload: (payload: unknown) =>
 				shapeZenPayload(payload, apiByModelId)?.payload ?? payload,
@@ -975,61 +993,66 @@ export default async function (pi: ExtensionAPI) {
 	// ─── Request lifecycle ──────────────────────────────────────────────────────
 
 	// Identity headers, per request: a `ses_...` pinned to pi's session (Zen keys
-	// sticky provider routing and prompt cache on it) and a fresh `msg_...`
-	// request id — the same pair opencode sends. Gated by isZenRequest, so other
-	// providers' requests are never touched.
+	// sticky provider routing and prompt cache on it), echoed under the four
+	// session header names v2 expects. v1's per-request `x-opencode-request` is
+	// gone — v2 rejects it with 403. Gated by isZenRequest, so other providers'
+	// requests are never touched.
 	pi.on("before_provider_headers", (event, ctx) => {
 		if (!isZenRequest(event.headers)) return;
-		event.headers["x-opencode-session"] = sessionIdFor(ctx);
-		event.headers["x-opencode-request"] = nextRequestId();
+		const session = sessionIdFor(ctx);
+		event.headers["x-opencode-session"] = session;
+		event.headers["x-opencode-session-id"] = session;
+		event.headers["x-session-affinity"] = session;
+		event.headers["x-session-id"] = session;
 	});
 
 	// Two jobs on every provider request:
 	//   1. drop OpenAI-only cache fields the Zen gateway may reject
 	//   2. guarantee the request shape Zen's free tier requires (see
-	//      ensureZenFreeTierShape) — the gate is `stream` + a `tools` array that
-	//      contains the file-search quartet (bash/glob/grep/read), and pi omits
-	//      `tools` on tool-less turns (and sends `[]` when replaying tool history)
+	//      ensureZenFreeTierShape) — the gate is `stream` + a `tools` array
+	//      carrying opencode's exact `read`/`shell` fingerprint definitions, and
+	//      pi omits `tools` on tool-less turns (and sends `[]` when replaying
+	//      tool history)
 	//
 	// Scope: applied to every provider's payload, not just our own. Forced by
 	// pi's event interface — before_provider_request carries only
 	// `{ type, payload }`, no headers, so there is nothing to gate on here (the
 	// isZenRequest gate lives on the headers event instead). Harm is bounded:
 	// unknown payload fields are stripped by the api clients anyway, and a
-	// non-Zen provider only ever sees the quartet decoys on tool-less
-	// turns — where the model is told they are unavailable, chat-completions
-	// also gets `tool_choice: "none"` (responses gets `store: false` + `"auto"`
-	// + a reasoning-item sweep), and any stray call is blocked harmlessly by
-	// the tool_call hook below (only when this request actually injected them).
+	// non-Zen provider only ever sees the appended placeholders on tool-less
+	// turns — where the system note tells the model they do nothing
+	// (responses also gets `store: false` + `"auto"` + a reasoning-item sweep),
+	// and any stray call is blocked harmlessly by the tool_call hook below
+	// (only when this request actually appended them).
 	//
 	// The payload carries the model id, so apiByModelId resolves the endpoint
-	// family and with it the decoy tools' wire shape (chat-completions,
+	// family and with it the fingerprint tools' wire shape (chat-completions,
 	// responses, or anthropic wrapper). Unregistered ids — other providers —
 	// pass through untouched: shaping a foreign payload in the wrong wire
-	// shape (e.g. chat-shaped decoys on a Responses payload) makes the other
+	// shape (e.g. chat-shaped tools on a Responses payload) makes the other
 	// provider's request 400. See shapeZenPayload in shared.ts.
 	pi.on("before_provider_request", (event, ctx) => {
 		const shaped = shapeZenPayload(event?.payload, apiByModelId);
 		const key = sessionIdFor(ctx);
 		if (shaped) {
-			inFlightDecoys.set(key, shaped.shouldBlock);
+			inFlightShaping.set(key, shaped);
 			return shaped.payload;
 		}
-		inFlightDecoys.delete(key);
+		inFlightShaping.delete(key);
 		return event?.payload;
 	});
 
-	// The decoy tools exist only to satisfy that shape. If the model
-	// calls one anyway, block it with a readable result instead of letting the
-	// turn die on an unknown tool — but ONLY when this session's in-flight
-	// request actually stands them in: pi's own real tools must
-	// keep running untouched on normal tool turns.
+	// The placeholder fingerprint tools exist only to satisfy that shape. If
+	// the model calls one anyway, block it with a readable result instead of
+	// letting the turn die on an unknown tool — but ONLY when this session's
+	// in-flight request actually appended them: pi's own real tools must keep
+	// running untouched on normal tool turns.
 	pi.on("tool_call", (event, ctx) => {
-		const shouldBlock = inFlightDecoys.get(sessionIdFor(ctx));
-		if (!shouldBlock || !shouldBlock(event.toolName)) return;
+		const shaping = inFlightShaping.get(sessionIdFor(ctx));
+		if (!shaping || !shaping.shouldBlock(event.toolName)) return;
 		return {
 			block: true,
-			reason: "Decoy tool added for Zen free-tier compatibility — no action needed.",
+			reason: "Placeholder tool added for Zen free-tier compatibility — no action needed.",
 		};
 	});
 
@@ -1038,12 +1061,28 @@ export default async function (pi: ExtensionAPI) {
 	// is plumbing only: narrow the message, ask, return the replacement per the
 	// message_end contract (the runner chains returned messages and
 	// agent-session swaps them in place before persistence and display).
-	pi.on("message_end", (event) => {
+	pi.on("message_end", (event, ctx) => {
 		const msg = event.message;
 		if (msg.role !== "assistant") return;
-		const friendly = zenFreeTierFriendlyError(msg) ?? zenQuotaFriendlyError(msg);
-		if (!friendly) return;
-		return { message: { ...msg, errorMessage: friendly } };
+		// Restore concealed tool names: a caller tool that collided with a
+		// fingerprint name traveled as `read_client`; the model's call must reach
+		// pi under the caller's original name or the turn dies on an unknown
+		// tool. Only active when this session's last request actually concealed
+		// something — restoreToolName is the identity otherwise.
+		const shaping = inFlightShaping.get(sessionIdFor(ctx));
+		let restored = msg;
+		if (shaping && Array.isArray(msg.content)) {
+			const content = msg.content.map((item) => {
+				if (item?.type !== "toolCall") return item;
+				const original = item.name;
+				const name = shaping.restoreToolName(original);
+				return name === original ? item : { ...item, name };
+			});
+			restored = { ...msg, content };
+		}
+		const friendly = zenFreeTierFriendlyError(restored) ?? zenQuotaFriendlyError(restored);
+		if (!friendly && restored === msg) return;
+		return { message: friendly ? { ...restored, errorMessage: friendly } : restored };
 	});
 
 	// Compaction on a pi-zen model: run pi's own compact() with the free-tier

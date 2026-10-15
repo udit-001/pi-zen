@@ -271,13 +271,14 @@ export function validateFreeModelsFile(data: unknown): data is FreeModelsFile {
 // Captured from a live opencode v1.18.31 request (its Zen baseUrl pointed at a
 // local logger):
 //
-//   POST /zen/v1/chat/completions
+//   POST /inference/v1/chat/completions
 //   authorization:      Bearer public
-//   user-agent:         opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+//   user-agent:         opencode/latest/2.0.26/cli
 //   x-opencode-client:  cli
 //   x-opencode-project: 012780c4098d08caa4ea8c479ed0a4690489f38d
 //   x-opencode-session: ses_f4f54dfb4ffenca2ngz8p9R1uA
-//   x-opencode-request: msg_0b0ab20c8001bs3RC6w093Nluk
+//   x-opencode-session-id / x-session-affinity / x-session-id: same ses_ value
+//   (the v1 `x-opencode-request` header is GONE — v2 rejects it with 403)
 //
 // The helpers below mirror opencode's own algorithms so we send the same
 // shapes, without depending on opencode's packages:
@@ -289,47 +290,45 @@ export function validateFreeModelsFile(data: unknown): data is FreeModelsFile {
 // Zen also gates its free tier on request *shape* (see ensureZenFreeTierShape):
 // a free-model call is served only when it streams and carries tools.
 //
-// Since the 1.17 server checks, OpenCode additionally enforces two wire-level
-// facts (9router PR #4105): the User-Agent must carry `opencode/>=1.17` (see
-// OPENCODE_MIN_UA_VERSION below), and every `x-opencode-session` must match
+// Since OpenCode v2 (2026-10-14, 9router #4842) the server enforces the v2
+// User-Agent shape: `opencode/<channel>/<major>.x.y/<client>` with major >= 2.
+// The v1 form (`opencode/1.18.x`, optionally with the AI-SDK suffix) is
+// rejected with 403 FreeTierError, as is any `x-opencode-request` header.
+// Every `x-opencode-session` must still match
 // /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/ with a *descending* (bit-inverted)
 // timestamp — see opencodeId. The captured pair above is the live evidence:
 // `ses_` starts f4f5… exactly because it is the ~complement of the msg_ id's
 // 0b0a… timestamp from the same request burst.
 
-/** The AI SDK suffix opencode's OpenAI-compatible client appends to its User-Agent. */
-export const OPENCODE_UA_SUFFIX = "ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+/** Verified-good opencode v2 identity parts (from the 2.0.26 CLI, via 9router #4842). */
+export const OPENCODE_UA_CHANNEL = "latest";
+export const OPENCODE_UA_VERSION = "2.0.26";
+export const OPENCODE_UA_CLIENT = "cli";
 
 /**
- * Verified-good opencode version: OpenCode's server serves the free tier only
- * to `User-Agent: opencode/<version>` with major > 1 or (major === 1 && minor
- * >= 17). Anything older gets 426 Upgrade Required; bare `opencode` or
- * third-party UAs get 403 FreeTierError. Used to clamp stale versions from
- * free-models.json and as the upstream-documented baseline (9router PR #4105).
+ * Build the User-Agent opencode v2 sends:
+ * `opencode/<channel>/<version>/<client>`.
+ *
+ * `version` is optional and defensive: a bare v2 version (major >= 2, e.g.
+ * scraped from a newer snapshot) is used verbatim; anything else — v1
+ * versions from older snapshots, junk — clamps to the pinned verified-good
+ * OPENCODE_UA_VERSION, so the header can never regress into a 403.
  */
-export const OPENCODE_MIN_UA_VERSION = "1.18.31";
-
-/** Build the User-Agent opencode sends: `opencode/<version> <ai-sdk suffix>`. */
-export function opencodeUserAgent(version: string): string {
-	return `opencode/${version} ${OPENCODE_UA_SUFFIX}`;
+export function opencodeUserAgent(version?: string): string {
+	return `opencode/${OPENCODE_UA_CHANNEL}/${validOpencodeVersion(version)}/${OPENCODE_UA_CLIENT}`;
 }
 
 /**
- * Clamp a configured opencode version (bare `X.Y[.Z]` as stored in
- * free-models.json) to one Zen accepts. Returns the version untouched when it
- * is >= 1.17, else OPENCODE_MIN_UA_VERSION — the same upgrade 9router applies
- * to bare/outdated downstream UAs: a low version would draw 426 / 403 from
- * OpenCode before the request is ever served.
+ * Clamp a configured opencode version (bare `X.Y.Z` as stored in
+ * free-models.json) to one the v2 server accepts. Returns the version
+ * untouched when it has major >= 2, else OPENCODE_UA_VERSION — the same clamp
+ * 9router applies to outdated downstream UAs: a v1 form or low version draws
+ * 403 FreeTierError from OpenCode before the request is ever served.
  */
-export function validOpencodeVersion(version: string): string {
-	const m = String(version || "").trim().match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-	if (!m) return OPENCODE_MIN_UA_VERSION;
-	const major = Number.parseInt(m[1] ?? "", 10);
-	const minor = Number.parseInt(m[2] ?? "", 10);
-	if (Number.isNaN(major) || Number.isNaN(minor) || major < 1 || (major === 1 && minor < 17)) {
-		return OPENCODE_MIN_UA_VERSION;
-	}
-	return m[0] ?? OPENCODE_MIN_UA_VERSION;
+export function validOpencodeVersion(version?: string): string {
+	const m = String(version ?? "").trim().match(/^(\d+)\.\d+\.\d+/);
+	if (m && Number.parseInt(m[1] ?? "", 10) >= 2) return m[0] ?? OPENCODE_UA_VERSION;
+	return OPENCODE_UA_VERSION;
 }
 
 /** opencode's id alphabet (base62, in upstream order). */
@@ -358,8 +357,11 @@ const ID_TIME_SHIFT = 0x1000n;
  *   - `msg` encodes `current` (ascending): request ids sort oldest-first.
  *
  * Caller contract (not enforced — wrong values corrupt the time field):
- *   - `counter` must be within one millisecond, i.e. 0 <= counter < 4096
- *     (callers keep a per-millisecond counter; see nextRequestId in index.ts)
+ *   - `counter` must be a real per-millisecond count and stay SMALL: v2
+ *     decodes it and rejects values >= ~100 with 403 FreeTierError (9router
+ *     #4842 live probes: 0–16 pass, >= 100 fail). Callers reset a per-ms
+ *     counter every millisecond (see nextRequestId in index.ts); a session id
+ *     minted once per conversation uses 0.
  *   - `random` must carry at least 14 bytes (exactly the first 14 are used)
  */
 export function opencodeId(
@@ -497,95 +499,144 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 
 // ─── Zen free-tier request shape ────────────────────────────────────────────
 //
-// Zen serves its free models only to requests that look like an agent turn.
-// Verified against the live endpoint (Sep 2026, re-probed Oct 2026), the gate is:
+// Zen serves its free models only to requests that look like opencode v2 CLI
+// traffic. Verified upstream (9router #4842, Oct 2026), the gate is:
 //
-//   stream:true  AND  tools containing the file-search quartet
-//                    "bash" "glob" "grep" "read" (lowercase)
+//   stream:true  AND  a `tools` array carrying opencode's own `read` and
+//                     `shell` tools with their EXACT v2 descriptions and
+//                     parameter schemas
 //
-// plus a `User-Agent` carrying opencode/>=1.17 and an `x-opencode-session`
-// matching /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/ (both satisfied by the header
-// pipeline in index.ts). Anything else fails 403 with
-// `FreeTierError: OpenCode's free tier can only be used from within OpenCode`.
-// In particular the tool names must literally be present: a single arbitrary
-// placeholder (pi-zen's previous `_zen_noop`), only one of the two names, or a
-// pi-style custom tool all draw the 403. 9router's Oct 2026 probes additionally
-// found case variants (`Bash`) rejected as duplicates and requests missing any
-// of the four names 403ing even with the other three present — hence the full
-// quartet below, not a subset. This is the same cloak 9router ships (open-sse/executors/
-// opencode.js, "fix free tier 403 error" — PR/commit 93837af).
+// plus the identity headers from the wire-parity section above. Anything else
+// fails 403 with `FreeTierError: OpenCode's free tier can only be used from
+// within OpenCode`. The v1 cloak pi-zen shipped (a "file-search quartet" of
+// stub-described decoys plus `tool_choice: "none"`) is rejected by the v2
+// gate: stubbed descriptions, renamed schemas and `tool_choice: "none"` all
+// draw the 403.
 //
-// pi omits `tools` for tool-less turns (and sends `[]` when replaying tool
-// history), so we stand in the two decoys. Their descriptions say they are
-// unavailable and must never be called. pi always streams, so the `stream`
-// half of the gate is satisfied.
+// pi omits `tools` for tool-less turns, and pi's real tool set collides with
+// the fingerprint names (`read`), so the shaping pass (ensureZenFreeTierShape):
 //
-// Per-family extras, all verified against the live endpoint / the opencode
-// console gateway (`packages/console/app/src/routes/zen` in the opencode v2
-// fork) and mirrored from 9router's executor:
+//   1. conceals caller tools whose name is exactly `read`/`shell` but whose
+//      definition differs from opencode's — they travel under a
+//      `read_client`-style alias, with explicit `tool_choice` objects and
+//      prior-turn tool calls retargeted to the alias (definition matches pass
+//      through untouched);
+//   2. appends opencode's verbatim definition for every fingerprint name not
+//      already declared;
+//   3. appends a system note telling the model the appended tools are
+//      placeholders. Wording matters: without the old "must not be used"
+//      descriptions the model does call the appended tools (live probe:
+//      `read` on "what files are in /etc?"), and "not available" made it also
+//      refuse the caller's own Read tool — "placeholders … use the other
+//      tools" keeps both working;
+//   4. injects a `reasoning_content` placeholder into assistant history
+//      messages that lack one: Zen reasoning models reject multi-turn chats
+//      without it (400 missing_required_parameter), and the response pipeline
+//      strips the field before it reaches the client, so the echo can never
+//      come from the client (9router #4805).
 //
-//   - Chat-completions (big-pickle, mimo, ling, nemotron, …): when the request
-//     had no tools, force `tool_choice: "none"` so the model cannot call a
-//     decoy it was told is unavailable (200 verified).
-//   - Responses (muse-spark): only `tool_choice: "auto"` is supported — `none`
-//     draws 400 `only "auto" is supported for "tool_choice"`. Free models run
-//     on a pool of shared upstream accounts with `store: false`, and prior-turn
-//     reasoning items carry account-bound `encrypted_content` that 400s on
-//     replay, so those items are dropped (see sanitizeZenResponsesItems below).
-//   - Anthropic-messages (union-alpha): no tool_choice forcing — Anthropic has
-//     no "none" and the model is not live anyway (401 "not supported").
-//
-// The wire wrapper differs per family — chat-completions nests under
-// `function`, responses and anthropic are flat.
+// The return value carries the response-side half of the recipe: shouldBlock
+// (block calls to the placeholders) and restoreToolName (map aliases back to
+// the caller's names) — see ZenShapedRequest.
+
+/** The tool names Zen's free tier requires in `tools`: opencode's own. */
+export const ZEN_FINGERPRINT_TOOL_NAMES = ["read", "shell"] as const;
+
+// Verbatim from the OpenCode v2.0.26 CLI (9router #4842). Upstream compares
+// description and parameters, so do not reword or reformat these. Exported
+// for tests and callers that must build a definition-exact tool.
+export const ZEN_FINGERPRINT_DEFINITIONS: Record<
+	string,
+	{ description: string; parameters: Record<string, unknown> }
+> = {
+	read: {
+		description:
+			"Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+		parameters: {
+			type: "object",
+			properties: {
+				path: { type: "string", description: "File or directory to read" },
+				offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
+				limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" },
+			},
+			required: ["path"],
+			additionalProperties: false,
+		},
+	},
+	shell: {
+		description:
+			"Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+		parameters: {
+			type: "object",
+			properties: {
+				command: { type: "string", description: "Shell command string to execute" },
+				workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+				timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
+				background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when they complete. DO NOT poll for completion." },
+			},
+			required: ["command"],
+			additionalProperties: false,
+		},
+	},
+};
+
+/** Read a tool's name from any of the three wire shapes (flat, chat, anthropic). */
+function zenToolNameOf(tool: unknown): string {
+	if (!tool || typeof tool !== "object") return "";
+	const t = tool as { name?: unknown; function?: { name?: unknown } };
+	if (typeof t.name === "string" && t.name.trim()) return t.name.trim();
+	if (typeof t.function?.name === "string" && t.function.name.trim()) return t.function.name.trim();
+	return "";
+}
+
+/** True when `tool` already carries opencode's exact v2 definition for `key`. */
+function isFingerprintDefinition(tool: unknown, key: string): boolean {
+	if (!tool || typeof tool !== "object") return false;
+	const t = tool as { function?: unknown; description?: unknown; parameters?: unknown; input_schema?: unknown };
+	// Chat shape nests under `function`; responses/anthropic are flat.
+	const def = (t.function && typeof t.function === "object" ? t.function : t) as typeof t;
+	const want = ZEN_FINGERPRINT_DEFINITIONS[key];
+	if (!want || typeof def.description !== "string" || def.description !== want.description) return false;
+	const params = def.parameters !== undefined ? def.parameters : def.input_schema;
+	return JSON.stringify(params) === JSON.stringify(want.parameters);
+}
+
+/** Wrap opencode's definition for `name` in the payload's endpoint-family shape. */
+function fingerprintTool(name: string, api: ModelApi | undefined): Record<string, unknown> {
+	const def = ZEN_FINGERPRINT_DEFINITIONS[name];
+	if (!def) return {};
+	const { description, parameters } = def;
+	if (api === "openai-responses") return { type: "function", name, description, parameters };
+	if (api === "anthropic-messages") return { name, description, input_schema: parameters };
+	return { type: "function", function: { name, description, parameters } };
+}
+
+/** Copy a tool with a new name, keeping its wire shape. */
+function withZenToolName(tool: unknown, name: string): Record<string, unknown> {
+	const t = tool as Record<string, unknown>;
+	if (t.function && typeof t.function === "object") {
+		return { ...t, function: { ...(t.function as Record<string, unknown>), name } };
+	}
+	return { ...t, name };
+}
 
 /**
- * The tool names Zen's free tier requires in `tools`: opencode's file-search
- * quartet, lowercase. 9router's Oct 2026 probes (open-sse/utils/
- * opencodeFingerprint.js) found requests without all four drawing 403
- * FreeTierError, and case variants (`Bash`) count as duplicates and are
- * rejected upstream — irrelevant here, pi's tool names are already lowercase.
+ * Result of shaping a request for Zen's free tier — the caller-facing half of
+ * the recipe. `payload` is the same (mutated) reference the caller passed in;
+ * `shouldBlock` answers "is this tool call one of the placeholders stood in by
+ * this shaping pass?" (never a real caller tool); `restoreToolName` maps a
+ * concealed alias (`read_client`) back to the caller's original tool name
+ * (identity for anything else). Both close over exactly what this pass did,
+ * so they are safe to hold until the response arrives.
  */
-export const ZEN_FREE_TIER_DECOY_TOOL_NAMES = ["bash", "glob", "grep", "read"] as const;
-
-const ZEN_DECOY_DESCRIPTION =
-	"This tool is currently unavailable and must not be used. Do not call it, and do not mention it.";
-
-/** Chat-completions wrapper: `{ type: "function", function: { name, ... } }`. */
-const ZEN_FREE_TIER_DECOY_TOOLS = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
-	type: "function",
-	function: { name, description: ZEN_DECOY_DESCRIPTION, parameters: { type: "object", properties: {} } },
-}));
-
-/** Responses-API wrapper: flat `{ type, name, description, parameters }`. */
-const ZEN_FREE_TIER_DECOY_TOOLS_RESPONSES = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
-	type: "function",
-	name,
-	description: ZEN_DECOY_DESCRIPTION,
-	parameters: { type: "object", properties: {} },
-}));
-
-/** Anthropic-messages wrapper: flat `{ name, description, input_schema }`. */
-const ZEN_FREE_TIER_DECOY_TOOLS_ANTHROPIC = ZEN_FREE_TIER_DECOY_TOOL_NAMES.map((name) => ({
-	name,
-	description: ZEN_DECOY_DESCRIPTION,
-	input_schema: { type: "object", properties: {} },
-}));
-
-/**
- * Result of shaping a request for Zen's free tier: the (mutated) payload plus a
- * predicate answering "is this tool call a decoy that must be blocked?" for
- * exactly the names this call stood in. Null when nothing was injected — the
- * payload already carried the full quartet as real tools, or was passed through
- * untouched (google family / non-object payloads). The predicate never matches
- * real tools: pi registers its own tools, so blanket blocking by name
- * would break genuine tool turns.
- */
-export type ZenDecoyInjection = {
+export type ZenShapedRequest = {
 	/** The (mutated) request payload — the same reference callers passed in. */
 	payload: Record<string, unknown>;
-	/** True only for decoy tools stood in by this call, never real tools. */
+	/** True only for placeholder tools appended by this call, never real tools. */
 	shouldBlock: (toolName: string) => boolean;
-} | null;
+	/** Map a model tool-call name back to the caller's original (identity otherwise). */
+	restoreToolName: (toolName: string) => string;
+};
 
 /**
  * Muse (openai-responses family) is served from a pool of shared upstream
@@ -617,42 +668,28 @@ export function sanitizeZenResponsesItems(payload: Record<string, unknown>): voi
 }
 
 /**
- * Internal: build the `shouldBlock` predicate for the decoy names a call stood
- * in. Closes over exactly the names injected by that call, so real pi tools
- * (which share those names on genuine tool turns) are never
- * matched.
- */
-function decoyBlocker(names: readonly string[]): (toolName: string) => boolean {
-	return (toolName) => names.includes(toolName);
-}
-
-/**
- * Guarantee the request shape Zen's free tier requires: a `tools` array that
- * contains the full file-search quartet (see ZEN_FREE_TIER_DECOY_TOOL_NAMES).
- * Shapes `payload` in place and returns the
- * same reference plus a `shouldBlock` predicate covering exactly the decoy
- * names this call stood in; returns `null` when nothing was needed (the
- * payload already carries the full quartet, is not a plain request object,
- * or the family is skipped).
+ * Guarantee the request shape Zen's free tier requires (see the section
+ * comment above). Shapes `payload` in place and returns the same reference
+ * plus the response-side callbacks; returns `null` when the family is skipped
+ * (google-generative-ai) or the payload is not a plain request object.
  *
- * - No tools / empty `tools` → stand in BOTH decoys; on chat-completions (and
- *   unknown families, which default to its shape) force `tool_choice: "none"`
- *   (when absent) so the model cannot call a decoy it was told is unavailable.
- * - `tools` present but missing a decoy name → append the missing ones
- *   (mirrors 9router; keeps the gate green for tool sets missing quartet names);
- *   `tool_choice` is left untouched — pi's own choice governs real tools.
- * - Responses family (muse-spark) additionally gets `store: false`, a
- *   `tool_choice` coerced to `"auto"` (the only value upstream accepts), and
- *   prior-turn reasoning items dropped (see sanitizeZenResponsesItems).
+ * `api` picks the wire shape for the payload's endpoint family; callers
+ * resolve it from the request's model id (the before_provider_request event
+ * carries no headers). Unknown families default to chat-completions, the
+ * family every free model but muse-spark and union-alpha uses.
  *
- * `api` picks the wrapper for the payload's endpoint family; callers resolve
- * it from the request's model id (the before_provider_request event carries no
- * headers). `google-generative-ai` is skipped — no free model uses it today
- * and its tool shape (`functionDeclarations`) differs from all three wrappers,
- * so the payload is left untouched rather than mangled. Unknown families
- * default to chat-completions, the family every other free model uses.
+ * Per-family extras, all mirrored from 9router's executor:
+ *   - Responses (muse-spark): `store: false` (free models run on a pool of
+ *     shared upstream accounts), `tool_choice` coerced to `"auto"` (the only
+ *     value upstream accepts), and prior-turn reasoning items dropped (see
+ *     sanitizeZenResponsesItems).
+ *   - Chat-completions: a `tool_choice: "none"` (v1's decoy guard) is now
+ *     REMOVED — v2 rejects it with 403 FreeTierError; the system note plus
+ *     the shouldBlock guard keep the placeholders uncalled.
+ *   - Anthropic-messages (union-alpha): no tool_choice handling — Anthropic
+ *     has no "none" and the model is not live anyway (401 "not supported").
  */
-export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenDecoyInjection {
+export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenShapedRequest | null {
 	if (api === "google-generative-ai") return null;
 	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
 	const obj = payload as Record<string, unknown>;
@@ -660,49 +697,186 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenDec
 	// Muse invariants (Responses family) hold for every request, tools or not.
 	if (api === "openai-responses") {
 		obj.store = false;
-		if (obj.tool_choice !== undefined && obj.tool_choice !== "auto") obj.tool_choice = "auto";
+		// "auto" is the only tool_choice upstream accepts on the Responses lane,
+		// and it must always be present (9router #4842).
+		obj.tool_choice = "auto";
 		sanitizeZenResponsesItems(obj);
+	} else if (obj.tool_choice === "none") {
+		delete obj.tool_choice;
 	}
 
-	const tools = Array.isArray(obj.tools) ? obj.tools : null;
-	if (tools === null || tools.length === 0) {
-		obj.tools =
-			api === "openai-responses"
-				? ZEN_FREE_TIER_DECOY_TOOLS_RESPONSES
-				: api === "anthropic-messages"
-					? ZEN_FREE_TIER_DECOY_TOOLS_ANTHROPIC
-					: ZEN_FREE_TIER_DECOY_TOOLS;
-		// Chat-completions — and unknown families, which default to its shape —
-		// can force "none" (verified 200); Responses cannot (already coerced to
-		// "auto" above); Anthropic has no "none".
-		if (api !== "openai-responses" && api !== "anthropic-messages" && obj.tool_choice === undefined) {
-			obj.tool_choice = "none";
+	const tools = Array.isArray(obj.tools) ? [...obj.tools] : [];
+	const aliases: { alias: string; original: string }[] = [];
+
+	// 1. Conceal caller tools that collide with a fingerprint name but are not
+	//    opencode's own definition of it.
+	const taken = new Set<string>(tools.map(zenToolNameOf).filter((name) => name !== ""));
+	const seenFingerprint = new Set<string>();
+	const shaped: unknown[] = [];
+	for (const tool of tools) {
+		const key = ZEN_FINGERPRINT_TOOL_NAMES.find((n) => n === zenToolNameOf(tool));
+		if (!key) {
+			shaped.push(tool);
+			continue;
 		}
-		return { payload: obj, shouldBlock: decoyBlocker(ZEN_FREE_TIER_DECOY_TOOL_NAMES) };
+		// Duplicate declarations of one name are rejected upstream; keep the first.
+		if (seenFingerprint.has(key)) continue;
+		seenFingerprint.add(key);
+		if (isFingerprintDefinition(tool, key)) {
+			shaped.push(tool);
+			continue;
+		}
+		let alias = `${key}_client`;
+		for (let i = 2; taken.has(alias); i++) alias = `${key}_client${i}`;
+		taken.add(alias);
+		aliases.push({ alias, original: key });
+		shaped.push(withZenToolName(tool, alias));
 	}
-	// Tools exist — but the gate only passes when BOTH names are present.
-	const names = new Set(
-		tools
-			.map((tool) => {
-				const t = tool as { name?: unknown; function?: { name?: unknown } };
-				return typeof t?.function?.name === "string"
-					? t.function.name
-					: typeof t?.name === "string"
-						? t.name
-						: "";
-			})
-			.filter((name) => name !== ""),
-	);
-	const missing: string[] = ZEN_FREE_TIER_DECOY_TOOL_NAMES.filter((name) => !names.has(name));
-	if (missing.length === 0) return null;
-	const appended =
-		api === "openai-responses"
-			? ZEN_FREE_TIER_DECOY_TOOLS_RESPONSES.filter((tool) => missing.includes(tool.name))
-			: api === "anthropic-messages"
-				? ZEN_FREE_TIER_DECOY_TOOLS_ANTHROPIC.filter((tool) => missing.includes(tool.name))
-				: ZEN_FREE_TIER_DECOY_TOOLS.filter((tool) => missing.includes(tool.function.name));
-	obj.tools = [...tools, ...appended];
-	return { payload: obj, shouldBlock: decoyBlocker(missing) };
+
+	// 2. Append opencode's verbatim definition for every fingerprint name not
+	//    already declared.
+	const appended: string[] = [];
+	const present = new Set(shaped.map(zenToolNameOf));
+	for (const name of ZEN_FINGERPRINT_TOOL_NAMES) {
+		if (present.has(name)) continue;
+		shaped.push(fingerprintTool(name, api));
+		appended.push(name);
+	}
+	obj.tools = shaped;
+
+	// 3. Tell the model the appended tools are placeholders.
+	noteUnavailableTools(obj, api, appended);
+
+	// Retarget explicit tool_choice and prior-turn calls to the aliases.
+	if (aliases.length > 0) {
+		retargetZenToolChoice(obj, aliases);
+		aliasZenHistoryToolCalls(obj, aliases);
+	}
+
+	// 4. reasoning_content placeholder for assistant history — chat family
+	//    only (the field is an OpenAI chat-completions extension; Responses
+	//    carries reasoning as separate input items, Anthropic as thinking
+	//    blocks). Injected for every Zen chat model: upstream ships the rule
+	//    provider-wide because non-reasoning models ignore the field while
+	//    reasoning models 400 without it (9router #4805, scope "all").
+	if (api !== "openai-responses" && api !== "anthropic-messages" && Array.isArray(obj.messages)) {
+		obj.messages = (obj.messages as Record<string, unknown>[]).map((m) => {
+			const rc = m?.reasoning_content;
+			if (m?.role !== "assistant" || (typeof rc === "string" && rc.length > 0)) return m;
+			return { ...m, reasoning_content: " " };
+		});
+	}
+
+	const appendedSet = new Set(appended);
+	const originalByAlias = new Map(aliases.map((a) => [a.alias, a.original]));
+	return {
+		payload: obj,
+		shouldBlock: (toolName) => appendedSet.has(toolName),
+		restoreToolName: (toolName) => originalByAlias.get(toolName) ?? toolName,
+	};
+}
+
+/**
+ * Point an explicit `tool_choice` at the alias of a concealed caller tool, so
+ * a forced choice keeps forcing the caller's actual tool. Handles the chat
+ * (`{ function: { name } }`) and flat (`{ name }`) object shapes; string
+ * choices ("auto", …) need no retargeting.
+ */
+function retargetZenToolChoice(
+	obj: Record<string, unknown>,
+	aliases: { alias: string; original: string }[],
+): void {
+	const choice = obj.tool_choice;
+	if (!choice || typeof choice !== "object" || Array.isArray(choice)) return;
+	const byOriginal = new Map(aliases.map((a) => [a.original, a.alias]));
+	const c = choice as { name?: unknown; function?: { name?: unknown } };
+	if (typeof c.name === "string" && byOriginal.has(c.name.trim())) {
+		obj.tool_choice = { ...(choice as Record<string, unknown>), name: byOriginal.get(c.name.trim()) };
+		return;
+	}
+	const fn = c.function;
+	if (fn && typeof fn === "object" && typeof fn.name === "string" && byOriginal.has(fn.name.trim())) {
+		obj.tool_choice = {
+			...(choice as Record<string, unknown>),
+			function: { ...(fn as Record<string, unknown>), name: byOriginal.get(fn.name.trim()) },
+		};
+	}
+}
+
+/**
+ * Rename prior-turn tool calls to concealed caller tools as well; otherwise
+ * the model reads its own earlier calls as calls to opencode's tool of the
+ * same name. Covers the chat (`messages[].tool_calls[].function.name`) and
+ * Responses (`input[]` function_call items) histories; the anthropic family
+ * is not live (401) and is left alone.
+ */
+function aliasZenHistoryToolCalls(
+	obj: Record<string, unknown>,
+	aliases: { alias: string; original: string }[],
+): void {
+	if (aliases.length === 0) return;
+	const byOriginal = new Map(aliases.map((a) => [a.original, a.alias]));
+
+	if (Array.isArray(obj.input)) {
+		obj.input = (obj.input as Record<string, unknown>[]).map((item) =>
+			item?.type === "function_call" && typeof item.name === "string" && byOriginal.has(item.name)
+				? { ...item, name: byOriginal.get(item.name) }
+				: item,
+		);
+	}
+
+	if (Array.isArray(obj.messages)) {
+		obj.messages = (obj.messages as Record<string, unknown>[]).map((msg) => {
+			if (!Array.isArray(msg?.tool_calls)) return msg;
+			return {
+				...msg,
+				tool_calls: (msg.tool_calls as { function?: { name?: unknown } }[]).map((call) =>
+					typeof call?.function?.name === "string" && byOriginal.has(call.function.name)
+						? { ...call, function: { ...call.function, name: byOriginal.get(call.function.name) } }
+						: call,
+				),
+			};
+		});
+	}
+}
+
+/**
+ * Tell the model, in the system prompt, that the appended placeholder tools
+ * must not be called (see the section comment above for why the note lives
+ * here and why it is worded "placeholders"). Per family: `instructions`
+ * (Responses), `system` (Anthropic), or a leading system message (chat).
+ */
+function noteUnavailableTools(
+	obj: Record<string, unknown>,
+	api: ModelApi | undefined,
+	names: string[],
+): void {
+	if (names.length === 0) return;
+	const list = names.map((name) => `\`${name}\``).join(" or ");
+	const note =
+		names.length > 1
+			? `Do not call the ${list} tools; they are placeholders that do nothing. Use the other tools you have been given instead.`
+			: `Do not call the ${list} tool; it is a placeholder that does nothing. Use the other tools you have been given instead.`;
+	if (api === "openai-responses") {
+		obj.instructions =
+			typeof obj.instructions === "string" && obj.instructions.trim()
+				? `${obj.instructions}\n\n${note}`
+				: note;
+		return;
+	}
+	if (api === "anthropic-messages") {
+		if (typeof obj.system === "string") obj.system = `${obj.system}\n\n${note}`;
+		else if (obj.system === undefined) obj.system = note;
+		return;
+	}
+	// OpenAI chat shape only.
+	if (!Array.isArray(obj.messages)) return;
+	const first = obj.messages[0] as { role?: unknown; content?: unknown } | undefined;
+	if (first?.role === "system" && typeof first.content === "string") {
+		obj.messages = [{ ...first, content: `${first.content}\n\n${note}` }, ...obj.messages.slice(1)];
+	} else {
+		obj.messages = [{ role: "system", content: note }, ...(obj.messages as unknown[])];
+	}
 }
 
 /** Where a payload's endpoint family comes from: the registered-model map. */
@@ -719,7 +893,7 @@ export type ZenApiLookup = Pick<Map<string, ModelApi>, "get">;
  * bypass `before_provider_request` (they call the provider with no `onPayload`),
  * so the session_before_compact handler has to shape its own payload.
  */
-export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenDecoyInjection | undefined {
+export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenShapedRequest | undefined {
 	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
 	const obj = payload as Record<string, unknown>;
 	// Gate on model id FIRST: only shape payloads for models we registered.

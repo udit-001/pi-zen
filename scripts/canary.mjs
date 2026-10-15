@@ -5,13 +5,14 @@
  * opencode.ai and exits nonzero when the gate rejects it.
  *
  * Drift-proof by construction: the request body is shaped by the SAME
- * `shapeZenPayload` the extension ships (decoy quartet, tool_choice forcing,
- * cache-field stripping all come from shared.ts), and ids + User-Agent come
- * from shared.ts helpers — Node >= 22.18 strips types natively, same as
- * `npm test`. Only the header assembly (7 lines, mirrored from index.ts
- * opencodeHeaders) is repeated, because index.ts itself needs pi's
- * ExtensionAPI and cannot run in CI. If Zen starts requiring a header, fix
- * both places — the canary failing first is the signal.
+ * `shapeZenPayload` the extension ships (fingerprint tools, aliasing,
+ * tool_choice rules, reasoning placeholder and cache-field stripping all come
+ * from shared.ts), and ids + User-Agent come from shared.ts helpers — Node
+ * >= 22.18 strips types natively, same as `npm test`. Only the header
+ * assembly (a few lines, mirrored from index.ts opencodeHeaders) is repeated,
+ * because index.ts itself needs pi's ExtensionAPI and cannot run in CI. If
+ * Zen starts requiring a header, fix both places — the canary failing first
+ * is the signal.
  *
  * No secrets: the probe authenticates exactly like a signed-out opencode CLI
  * (Authorization: Bearer public). One request per candidate, three candidates
@@ -29,7 +30,7 @@ import {
 
 /**
  * One live probe against the free tier. The request body is shaped by the
- * shipped `shapeZenPayload` (decoy quartet, tool_choice forcing, cache-field
+ * shipped `shapeZenPayload` (fingerprint tools, tool_choice rules, cache-field
  * stripping all come from shared.ts) — exactly what a real tool-less pi turn
  * sends. Verdict classification is `canaryVerdict` from shared.ts, pinned by
  * tests/canary-verdict.test.ts; exit 0 = pass/inconclusive, 1 = page.
@@ -53,7 +54,7 @@ async function main() {
 
 	const statuses = [];
 	for (const model of candidates) {
-		// The shipped shaping stands in the decoys and forces tool_choice —
+		// The shipped shaping appends the fingerprint placeholders —
 		// exactly what a real tool-less pi turn sends.
 		const payload = {
 			model: model.id,
@@ -63,9 +64,12 @@ async function main() {
 		shapeZenPayload(payload, apiByModelId);
 
 		const now = Date.now();
+		// v2 identity headers (mirrors index.ts): the session value under four
+		// names; no x-opencode-request — v2 rejects the v1 header with 403.
+		const session = opencodeId("ses", now, 0, new Uint8Array(14).fill(7));
 		let status;
 		try {
-			const res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+			const res = await fetch("https://opencode.ai/inference/v1/chat/completions", {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -73,8 +77,10 @@ async function main() {
 					"User-Agent": opencodeUserAgent(validOpencodeVersion(snapshot.opencodeVersion)),
 					"x-opencode-client": "cli",
 					"x-opencode-project": "global",
-					"x-opencode-session": opencodeId("ses", now, 0, new Uint8Array(14).fill(7)),
-					"x-opencode-request": opencodeId("msg", now, 1, new Uint8Array(14).fill(8)),
+					"x-opencode-session": session,
+					"x-opencode-session-id": session,
+					"x-session-affinity": session,
+					"x-session-id": session,
 					Accept: "text/event-stream",
 				},
 				body: JSON.stringify(payload),

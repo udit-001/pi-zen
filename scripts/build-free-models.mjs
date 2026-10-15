@@ -196,7 +196,7 @@ const KNOWN_FREE_ALIASES = [
 	{
 		id: "muse-spark-1.2-contributor-free",
 		name: "Muse Spark 1.2 Free",
-		endpoint: "https://opencode.ai/zen/v1/responses",
+		endpoint: "https://opencode.ai/inference/v1/responses",
 	},
 ];
 
