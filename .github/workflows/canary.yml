@@ -46,6 +46,7 @@ jobs:
       # — that is exactly when the extension needs the verdict and the schedule
       # must stay enabled so tomorrow's probe can confirm recovery.
       - name: Publish canary status to the data branch
+        id: publish
         if: always()
         run: |
           test -f "$RUNNER_TEMP/canary-status.json" || { echo "no status files (probe crashed before writing)"; exit 0; }
@@ -67,3 +68,26 @@ jobs:
           fi
           git commit -m "chore: canary status [skip ci]"
           git push origin data
+          # Signal the purge step below; skipped when nothing was pushed.
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Purge jsdelivr CDN cache
+        # Only needed when the verdict actually changed — unchanged content
+        # means the CDN is already serving exactly what we would publish.
+        if: steps.publish.outputs.pushed == 'true'
+        run: |
+          # The extension fetches canary-status.json through jsdelivr, whose
+          # edge keeps serving the previous verdict until purged. Without this,
+          # a stale "fail" keeps the free models hidden after a recovery (and
+          # a stale "pass" keeps broken models visible) until the TTL expires.
+          PURGE_URL="https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/canary-status.json"
+          if ! BODY=$(curl -sS --fail --retry 3 --retry-delay 5 "$PURGE_URL"); then
+            echo "❌ jsdelivr purge request failed — the CDN will keep serving the stale verdict until its cache expires."
+            exit 1
+          fi
+          echo "$BODY"
+          if echo "$BODY" | grep -q '"throttled":[[:space:]]*true'; then
+            echo "⚠️  jsdelivr throttled this purge — some edges may keep the old verdict until their TTL expires."
+          else
+            echo "✅ jsdelivr CDN purged — edges re-fetch the updated canary-status.json on next request"
+          fi
