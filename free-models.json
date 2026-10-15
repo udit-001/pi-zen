@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-15T10:44:37.286Z",
+	"generatedAt": "2026-10-15T16:09:47.819Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 13,
+	"count": 14,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "1.19.0",
 	"models": [
@@ -353,6 +353,42 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 262144,
+			"compat": {
+				"maxTokensField": "max_tokens",
+				"supportsStore": false,
+				"supportsReasoningEffort": true,
+				"supportsDeveloperRole": false,
+				"supportsUsageInStreaming": false,
+				"requiresReasoningContentOnAssistantMessages": true
+			}
+		},
+		{
+			"id": "nemotron-3.5-super-vl-free",
+			"name": "Nemotron 3.5 Super VL Free",
+			"api": "openai-completions",
+			"endpoint": "https://opencode.ai/inference/v1/chat/completions",
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"off": "none",
+				"minimal": "minimal",
+				"low": "low",
+				"medium": "medium",
+				"high": "high",
+				"xhigh": "xhigh",
+				"max": null
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
 			"compat": {
 				"maxTokensField": "max_tokens",
 				"supportsStore": false,
