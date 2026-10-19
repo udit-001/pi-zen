@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-19T02:54:53.678Z",
+	"generatedAt": "2026-10-19T11:53:24.040Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 15,
 	"defaultModel": "big-pickle",
@@ -124,23 +124,13 @@
 			}
 		},
 		{
-			"id": "space-bunny-free",
-			"name": "Space Bunny Free",
+			"id": "minimax-m3.1-flash-free",
+			"name": "MiniMax M3.1 Flash Free",
 			"api": "openai-completions",
 			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"thinkingLevelMap": {
-				"off": null,
-				"minimal": null,
-				"low": "low",
-				"medium": "medium",
-				"high": "high",
-				"xhigh": "xhigh",
-				"max": "max"
-			},
+			"reasoning": false,
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"cost": {
 				"input": 0,
@@ -148,15 +138,14 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
-			"maxTokens": 524288,
+			"contextWindow": 128000,
+			"maxTokens": 8192,
 			"compat": {
 				"maxTokensField": "max_tokens",
 				"supportsStore": false,
-				"supportsReasoningEffort": true,
+				"supportsReasoningEffort": false,
 				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false,
-				"requiresReasoningContentOnAssistantMessages": true
+				"supportsUsageInStreaming": false
 			}
 		},
 		{
