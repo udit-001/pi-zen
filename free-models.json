@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-19T11:53:24.040Z",
+	"generatedAt": "2026-10-19T18:12:57.833Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 15,
 	"defaultModel": "big-pickle",
@@ -128,9 +128,19 @@
 			"name": "MiniMax M3.1 Flash Free",
 			"api": "openai-completions",
 			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": false,
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"off": null,
+				"minimal": null,
+				"low": "low",
+				"medium": "medium",
+				"high": "high",
+				"xhigh": "xhigh",
+				"max": "max"
+			},
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0,
@@ -138,14 +148,15 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192,
+			"contextWindow": 1000000,
+			"maxTokens": 512000,
 			"compat": {
 				"maxTokensField": "max_tokens",
 				"supportsStore": false,
-				"supportsReasoningEffort": false,
+				"supportsReasoningEffort": true,
 				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false
+				"supportsUsageInStreaming": false,
+				"requiresReasoningContentOnAssistantMessages": true
 			}
 		},
 		{
