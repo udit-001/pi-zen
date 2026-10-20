@@ -207,6 +207,11 @@ function enrichWithMetadata(freeIds, devSlice) {
 
 	for (const entry of freeIds) {
 		const meta = devSlice[entry.id];
+		// Purge deprecated models (models.dev marks them status: "deprecated"):
+		// shipping a dead model means every pick fails until Zen's error, and a
+		// live session can't recover. Skip at build time; the runtime evict-on-
+		// error loop (index.ts message_end) catches anything missed between runs.
+		if (meta?.status === "deprecated") continue;
 		const reasoning = meta?.reasoning === true;
 		const context = meta?.limit?.context;
 		const output = meta?.limit?.output;

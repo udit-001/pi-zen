@@ -702,6 +702,25 @@ async function resolveOrRecover(): Promise<ZenModelConfig[]> {
 	return lastGood;
 }
 
+/**
+ * Drop a dead model (Zen deprecation) from every cache the module keeps:
+ * in-memory last-good, the curated-list cache, and the disk snapshot. The
+ * next-known-good caller re-registers the provider with what remains. Returns
+ * the surviving list. Mirrors the fork's evictModel — without it, a deprecated
+ * model lingers in /model and fails on every pick until a reinstall.
+ */
+function evictModel(modelId: string): ZenModelConfig[] {
+	const current = (lastGood && lastGood.length > 0 ? lastGood : knownModelsSync()).filter(
+		(m) => m.id !== modelId,
+	);
+	lastGood = current;
+	if (freeModelsCache) {
+		freeModelsCache.models = freeModelsCache.models.filter((m) => m.id !== modelId);
+	}
+	writeSnapshot(current);
+	return current;
+}
+
 // ─── Provider Registration ───────────────────────────────────────────────────
 
 function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
@@ -864,6 +883,29 @@ function zenFreeTierFriendlyError(msg: FailedAssistantMessage): string | undefin
 	return [
 		`pi-zen: "${msg.model}" failed. The free service is not accepting pi-zen right now; it is not your quota or key.`,
 		"Use another model for now (/model). It clears on its own once pi-zen ships a fix.",
+	].join("\n");
+}
+
+// A retired free model answers with a deprecation error instead of a normal
+// turn. Unlike quota (resets) and the gate (clears on its own), this one never
+// recovers — the model is gone — so the copy says to switch and the
+// message_end handler evicts the dead entry from every cache (see
+// evictModel): the stale model disappears from /model without a reinstall.
+//
+// Wording: no pi RETRYABLE markers; "deprecated" and "removed" are not on the
+// retryable list, so the plain statement cannot trigger pi's auto-retry loop.
+const ZEN_DEPRECATED_MODEL_PATTERN = /ModelDeprecated|has been deprecated/i;
+
+/**
+ * Friendly replacement text for a Zen deprecated-model error, or undefined
+ * when the message isn't one. Pure, like the two formatters above.
+ */
+function zenDeprecatedFriendlyError(msg: FailedAssistantMessage): string | undefined {
+	if (msg.stopReason !== "error" || msg.provider !== PROVIDER_ID) return undefined;
+	if (!msg.errorMessage || !ZEN_DEPRECATED_MODEL_PATTERN.test(msg.errorMessage)) return undefined;
+	return [
+		`pi-zen: "${msg.model}" was deprecated by Zen and removed from the free list.`,
+		"Pick another model (/model). The stale entry is dropped automatically.",
 	].join("\n");
 }
 
@@ -1107,7 +1149,19 @@ export default async function (pi: ExtensionAPI) {
 			});
 			restored = { ...msg, content };
 		}
-		const friendly = zenFreeTierFriendlyError(restored) ?? zenQuotaFriendlyError(restored);
+		// A deprecated-model error never recovers: evict the dead entry from
+		// every cache and re-register so /model stops offering it. Runs before
+		// the friendly rewrite below, which explains the eviction to the user.
+		if (
+			restored.stopReason === "error" &&
+			restored.provider === PROVIDER_ID &&
+			restored.errorMessage &&
+			ZEN_DEPRECATED_MODEL_PATTERN.test(restored.errorMessage)
+		) {
+			registerProvider(pi, evictModel(restored.model));
+		}
+		const friendly =
+			zenDeprecatedFriendlyError(restored) ?? zenFreeTierFriendlyError(restored) ?? zenQuotaFriendlyError(restored);
 		if (!friendly && restored === msg) return;
 		return { message: friendly ? { ...restored, errorMessage: friendly } : restored };
 	});
