@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-10-20T21:09:40.809Z",
+	"generatedAt": "2026-10-20T23:49:49.526Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 15,
+	"count": 11,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "1.19.3",
 	"models": [
@@ -195,41 +195,6 @@
 			}
 		},
 		{
-			"id": "ll-alpha-free",
-			"name": "LL Alpha Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"thinkingLevelMap": {
-				"off": null,
-				"minimal": null,
-				"low": "low",
-				"medium": "medium",
-				"high": "high",
-				"xhigh": "xhigh",
-				"max": "max"
-			},
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262144,
-			"maxTokens": 65536,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false,
-				"requiresReasoningContentOnAssistantMessages": true
-			}
-		},
-		{
 			"id": "longcat-2.5-preview-free",
 			"name": "LongCat 2.5 Preview Free",
 			"api": "openai-completions",
@@ -257,70 +222,8 @@
 			}
 		},
 		{
-			"id": "exo-free",
-			"name": "Exo Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"thinkingLevelMap": {
-				"off": null,
-				"minimal": null,
-				"low": null,
-				"medium": null,
-				"high": "high",
-				"xhigh": null,
-				"max": null
-			},
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 131072,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false
-			}
-		},
-		{
 			"id": "mimo-v2.6-flash-free",
 			"name": "MiMo-V2.6-Flash Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 200000,
-			"maxTokens": 32000,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false,
-				"requiresReasoningContentOnAssistantMessages": true
-			}
-		},
-		{
-			"id": "mimo-v2.5-free",
-			"name": "MiMo V2.5 Free",
 			"api": "openai-completions",
 			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
 			"reasoning": true,
@@ -432,35 +335,6 @@
 				"supportsUsageInStreaming": false,
 				"requiresReasoningContentOnAssistantMessages": true
 			}
-		},
-		{
-			"id": "muse-spark-1.2-contributor-free",
-			"name": "Muse Spark 1.2 Free",
-			"api": "openai-responses",
-			"endpoint": "https://opencode.ai/inference/v1/responses",
-			"reasoning": true,
-			"thinkingLevelMap": {
-				"off": null,
-				"minimal": "minimal",
-				"low": "low",
-				"medium": "medium",
-				"high": "high",
-				"xhigh": "xhigh",
-				"max": null
-			},
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 131072,
-			"compat": {}
 		}
 	]
 }
