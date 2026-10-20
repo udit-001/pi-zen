@@ -4,7 +4,8 @@
  * build step or test framework is needed. These cross exactly the same seam
  * callers use (ensureZenFreeTierShape / shapeZenPayload / sanitizeZenResponsesItems)
  * and pin the v2 recipe verified upstream (9router #4842/#4805, Oct 2026):
- * exact read/shell fingerprint tools, alias concealment, no tool_choice
+ * exact read/shell fingerprint tools, wire-def swap for compatible caller
+ * tools (alias concealment as fallback), no tool_choice
  * "none", system-note, and the reasoning_content placeholder.
  */
 import { strict as assert } from "node:assert";
@@ -47,9 +48,10 @@ test("chat tool-less turn: appends the exact read/shell fingerprint, no tool_cho
 	assert.strictEqual(result!.shouldBlock("shell"), true);
 	assert.strictEqual(result!.shouldBlock("edit"), false);
 	assert.strictEqual(result!.restoreToolName("read_client"), "read_client"); // identity
-	// The system note tells the model the placeholders do nothing.
+	// The system note tells the model what the placeholders are and what to use instead.
 	assert.strictEqual((payload.messages as JsonObj[])[0]!.role, "system");
-	assert.match((payload.messages as JsonObj[])[0]!.content, /placeholders that do nothing/);
+	assert.match((payload.messages as JsonObj[])[0]!.content, /satisfy the API gateway/);
+	assert.match((payload.messages as JsonObj[])[0]!.content, /call `bash`/);
 });
 
 test("chat multi-turn: assistant messages get a reasoning_content placeholder (9router #4805)", () => {
@@ -75,19 +77,75 @@ test("chat multi-turn: assistant messages get a reasoning_content placeholder (9
 	assert.strictEqual(messages[5]!.reasoning_content, undefined);
 });
 
-test("chat with a colliding pi `read` tool: concealed to read_client, shell appended", () => {
+/** pi's native read schema — wire-compatible with opencode's fingerprint def. */
+const piReadTool = {
+	type: "function",
+	function: {
+		name: "read",
+		description: "Read the contents of a file. Supports text files and images.",
+		parameters: {
+			type: "object",
+			properties: {
+				path: { type: "string", description: "Path to the file to read" },
+				offset: { type: "number", description: "Line number to start reading from" },
+				limit: { type: "number", description: "Maximum number of lines to read" },
+			},
+			required: ["path"],
+		},
+	},
+};
+
+test("chat with pi's compatible `read`: name kept, def swapped, nothing blocked for read", () => {
 	const payload: JsonObj = {
 		model: "big-pickle",
 		messages: [{ role: "system", content: "be brief" }],
 		stream: true,
-		tools: [chatTool("read"), chatTool("edit")],
+		tools: [structuredClone(piReadTool), chatTool("edit")],
+		tool_choice: { function: { name: "read" } },
+	};
+	const result = ensureZenFreeTierShape(payload, "openai-completions");
+	assert.notEqual(result, null);
+	// `read` keeps its name (now the caller's real tool); only `shell` is appended.
+	assert.deepEqual(toolNamesOf(payload), ["read", "edit", "shell"]);
+	// the wire def is opencode's verbatim one
+	const read = (payload.tools as JsonObj[])[0]!.function!;
+	assert.strictEqual(read.description, ZEN_FINGERPRINT_DEFINITIONS.read!.description);
+	assert.deepEqual(read.parameters, ZEN_FINGERPRINT_DEFINITIONS.read!.parameters);
+	// explicit tool_choice name stays valid — it now points at the real tool
+	assert.deepEqual(payload.tool_choice, { function: { name: "read" } });
+	// response side: nothing to restore for read, shell still blocked
+	assert.strictEqual(result!.restoreToolName("read"), "read");
+	assert.strictEqual(result!.shouldBlock("read"), false);
+	assert.strictEqual(result!.shouldBlock("shell"), true);
+	assert.strictEqual(result!.aliasFor("read"), undefined);
+});
+
+test("chat with an incompatible foreign `read`: alias fallback as before", () => {
+	const foreignRead = {
+		type: "function",
+		function: {
+			name: "read",
+			description: "x",
+			parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+		},
+	};
+	const payload: JsonObj = {
+		model: "big-pickle",
+		messages: [{ role: "system", content: "be brief" }],
+		stream: true,
+		tools: [foreignRead, chatTool("edit")],
 		tool_choice: { function: { name: "read" } },
 	};
 	const result = ensureZenFreeTierShape(payload, "openai-completions");
 	assert.notEqual(result, null);
 	assert.deepEqual(toolNamesOf(payload), ["read_client", "edit", "read", "shell"]);
-	// explicit tool_choice retargeted to the alias
 	assert.deepEqual(payload.tool_choice, { function: { name: "read_client" } });
+	assert.strictEqual(result!.restoreToolName("read_client"), "read");
+	assert.strictEqual(result!.shouldBlock("read"), true); // the appended placeholder
+	assert.strictEqual(result!.shouldBlock("read_client"), false); // the caller's real tool
+	// block copy can name the working substitute
+	assert.strictEqual(result!.aliasFor("read"), "read_client");
+	assert.strictEqual(result!.aliasFor("shell"), undefined);
 	// prior-turn calls to the concealed tool are retargeted too
 	const payload2: JsonObj = {
 		model: "big-pickle",
@@ -95,7 +153,7 @@ test("chat with a colliding pi `read` tool: concealed to read_client, shell appe
 			{ role: "assistant", tool_calls: [{ function: { name: "read", arguments: {} } }] },
 		],
 		stream: true,
-		tools: [chatTool("read")],
+		tools: [structuredClone(foreignRead)],
 	};
 	ensureZenFreeTierShape(payload2, "openai-completions");
 	// system note prepended → assistant moved to index 1
@@ -103,11 +161,6 @@ test("chat with a colliding pi `read` tool: concealed to read_client, shell appe
 		(payload2.messages as JsonObj[])[1]!.tool_calls![0]!.function!.name,
 		"read_client",
 	);
-	// response side: alias restored, placeholder blocked
-	assert.strictEqual(result!.restoreToolName("read_client"), "read");
-	assert.strictEqual(result!.restoreToolName("edit"), "edit");
-	assert.strictEqual(result!.shouldBlock("read"), true); // the appended placeholder
-	assert.strictEqual(result!.shouldBlock("read_client"), false); // the caller's real tool
 });
 
 test("chat with opencode's exact definitions: nothing appended, nothing blocked", () => {
@@ -143,7 +196,7 @@ test("responses tool-less turn: flat fingerprint tools + store:false + tool_choi
 	assert.strictEqual(payload.store, false);
 	assert.strictEqual(payload.tool_choice, "auto");
 	assert.strictEqual(typeof payload.instructions, "string");
-	assert.match(payload.instructions as string, /placeholders that do nothing/);
+	assert.match(payload.instructions as string, /satisfy the API gateway/);
 	assert.strictEqual(result!.shouldBlock("read"), true);
 	assert.strictEqual(result!.shouldBlock("shell"), true);
 });
@@ -223,7 +276,7 @@ test("anthropic tool-less turn: anthropic-shaped fingerprint tools, no tool_choi
 	assert.strictEqual(read.function, undefined);
 	assert.strictEqual(payload.tool_choice, undefined);
 	assert.strictEqual(typeof payload.system, "string");
-	assert.match(payload.system as string, /placeholders that do nothing/);
+	assert.match(payload.system as string, /satisfy the API gateway/);
 });
 
 test("google family: passed through untouched", () => {

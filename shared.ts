@@ -553,19 +553,26 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 // pi omits `tools` for tool-less turns, and pi's real tool set collides with
 // the fingerprint names (`read`), so the shaping pass (ensureZenFreeTierShape):
 //
-//   1. conceals caller tools whose name is exactly `read`/`shell` but whose
-//      definition differs from opencode's — they travel under a
-//      `read_client`-style alias, with explicit `tool_choice` objects and
-//      prior-turn tool calls retargeted to the alias (definition matches pass
-//      through untouched);
+//   1. resolves caller tools whose name is exactly `read`/`shell` but whose
+//      definition differs from opencode's. When the caller's schema accepts
+//      calls shaped by the fingerprint schema (pi's native `read` does: same
+//      path/offset/limit fields), the tool KEEPS its name and only its wire
+//      description and parameters are swapped to opencode's verbatim def — a
+//      model call to `read` then dispatches to the caller's real tool and
+//      nothing is blocked. Only an incompatible schema (a foreign `read` with
+//      different fields) falls back to alias concealment: the tool travels
+//      under a `read_client`-style alias, with explicit `tool_choice` objects
+//      and prior-turn tool calls retargeted to the alias (definition matches
+//      pass through untouched);
 //   2. appends opencode's verbatim definition for every fingerprint name not
-//      already declared;
+//      already declared — after a successful swap that is normally `shell`
+//      alone, since pi has no tool of that name;
 //   3. appends a system note telling the model the appended tools are
 //      placeholders. Wording matters: without the old "must not be used"
 //      descriptions the model does call the appended tools (live probe:
 //      `read` on "what files are in /etc?"), and "not available" made it also
-//      refuse the caller's own Read tool — "placeholders … use the other
-//      tools" keeps both working;
+//      refuse the caller's own Read tool — the note names the real substitute
+//      (`bash` for commands) so a stray call self-corrects on the next try;
 //   4. injects a `reasoning_content` placeholder into assistant history
 //      messages that lack one: Zen reasoning models reject multi-turn chats
 //      without it (400 missing_required_parameter), and the response pipeline
@@ -573,8 +580,9 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 //      come from the client (9router #4805).
 //
 // The return value carries the response-side half of the recipe: shouldBlock
-// (block calls to the placeholders) and restoreToolName (map aliases back to
-// the caller's names) — see ZenShapedRequest.
+// (block calls to the placeholders), restoreToolName (map aliases back to the
+// caller's names), and aliasFor (the inverse — which wire name a blocked
+// fingerprint name should be retried as) — see ZenShapedRequest.
 
 /** The tool names Zen's free tier requires in `tools`: opencode's own. */
 export const ZEN_FINGERPRINT_TOOL_NAMES = ["read", "shell"] as const;
@@ -638,6 +646,57 @@ function isFingerprintDefinition(tool: unknown, key: string): boolean {
 	return JSON.stringify(params) === JSON.stringify(want.parameters);
 }
 
+/**
+ * True when the caller's tool schema accepts calls shaped by opencode's
+ * fingerprint schema for `read` — same field names and types — so its wire
+ * definition can be swapped to the verbatim def without breaking execution.
+ * Anything else (a foreign `read` with extra or differently typed fields)
+ * falls back to alias concealment.
+ */
+function isWireCompatibleRead(tool: unknown): boolean {
+	if (!tool || typeof tool !== "object") return false;
+	const t = tool as { function?: unknown; parameters?: unknown; input_schema?: unknown };
+	const fn = t.function && typeof t.function === "object" ? (t.function as Record<string, unknown>) : t;
+	const raw = fn.parameters ?? t.input_schema;
+	if (!raw || typeof raw !== "object") return false;
+	const params = raw as Record<string, unknown>;
+	if (params.type !== "object") return false;
+	if (!params.properties || typeof params.properties !== "object") return false;
+	const props = params.properties as Record<string, unknown>;
+	const names = Object.keys(props);
+	if (!names.includes("path")) return false;
+	if (!names.every((n) => n === "path" || n === "offset" || n === "limit")) return false;
+	const pathType = (props.path as Record<string, unknown> | undefined)?.type;
+	if (pathType !== "string") return false;
+	for (const n of ["offset", "limit"] as const) {
+		if (!(n in props)) continue;
+		const ty = (props[n] as Record<string, unknown>).type;
+		if (ty !== "number" && ty !== "integer") return false;
+	}
+	const required = Array.isArray(params.required) ? (params.required as unknown[]) : [];
+	return required.includes("path") && required.every((r) => r === "path" || r === "offset" || r === "limit");
+}
+
+/**
+ * Overwrite a tool's description and parameter schema with opencode's verbatim
+ * fingerprint def for `key`, keeping its wire shape and — critically — its
+ * name. The gate compares description and parameters, so the swapped tool
+ * satisfies it without an alias; calls to the name still dispatch to the
+ * caller's real tool.
+ */
+function swapFingerprintDef(tool: unknown, key: string): Record<string, unknown> {
+	const def = ZEN_FINGERPRINT_DEFINITIONS[key];
+	if (!def) return tool as Record<string, unknown>;
+	const t = tool as Record<string, unknown>;
+	if (t.function && typeof t.function === "object") {
+		return { ...t, function: { ...(t.function as Record<string, unknown>), description: def.description, parameters: def.parameters } };
+	}
+	if (t.input_schema !== undefined) {
+		return { ...t, description: def.description, input_schema: def.parameters };
+	}
+	return { ...t, description: def.description, parameters: def.parameters };
+}
+
 /** Wrap opencode's definition for `name` in the payload's endpoint-family shape. */
 function fingerprintTool(name: string, api: ModelApi | undefined): Record<string, unknown> {
 	const def = ZEN_FINGERPRINT_DEFINITIONS[name];
@@ -673,6 +732,13 @@ export type ZenShapedRequest = {
 	shouldBlock: (toolName: string) => boolean;
 	/** Map a model tool-call name back to the caller's original (identity otherwise). */
 	restoreToolName: (toolName: string) => string;
+	/**
+	 * The wire alias a concealed fingerprint name traveled under, when one
+	 * exists — the inverse of restoreToolName. Block copy uses it to tell the
+	 * model which name actually executes; undefined when the name was appended
+	 * as a placeholder with no caller tool behind it.
+	 */
+	aliasFor: (toolName: string) => string | undefined;
 };
 
 /**
@@ -763,6 +829,14 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenSha
 			shaped.push(tool);
 			continue;
 		}
+		// Wire-compatible schema: keep the caller's name and swap only the
+		// description and parameters to opencode's verbatim def. The name now
+		// points at the caller's real tool, so a model call to it executes
+		// normally — no alias, no placeholder to block.
+		if (key === "read" && isWireCompatibleRead(tool)) {
+			shaped.push(swapFingerprintDef(tool, key));
+			continue;
+		}
 		let alias = `${key}_client`;
 		for (let i = 2; taken.has(alias); i++) alias = `${key}_client${i}`;
 		taken.add(alias);
@@ -806,10 +880,12 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenSha
 
 	const appendedSet = new Set(appended);
 	const originalByAlias = new Map(aliases.map((a) => [a.alias, a.original]));
+	const aliasByOriginal = new Map(aliases.map((a) => [a.original, a.alias]));
 	return {
 		payload: obj,
 		shouldBlock: (toolName) => appendedSet.has(toolName),
 		restoreToolName: (toolName) => originalByAlias.get(toolName) ?? toolName,
+		aliasFor: (toolName) => aliasByOriginal.get(toolName),
 	};
 }
 
@@ -890,10 +966,11 @@ function noteUnavailableTools(
 ): void {
 	if (names.length === 0) return;
 	const list = names.map((name) => `\`${name}\``).join(" or ");
+	const noun = names.length > 1 ? "tools are" : "tool is";
+	const pronoun = names.length > 1 ? "them" : "it";
+	const bashHint = names.includes("shell") ? " For shell commands, call `bash`." : "";
 	const note =
-		names.length > 1
-			? `Do not call the ${list} tools; they are placeholders that do nothing. Use the other tools you have been given instead.`
-			: `Do not call the ${list} tool; it is a placeholder that does nothing. Use the other tools you have been given instead.`;
+		`The ${list} ${noun} sent only to satisfy the API gateway; calling ${pronoun} returns an error.${bashHint} Use the other tools you have been given for everything else.`;
 	if (api === "openai-responses") {
 		obj.instructions =
 			typeof obj.instructions === "string" && obj.instructions.trim()

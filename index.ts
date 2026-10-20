@@ -1063,16 +1063,23 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// The placeholder fingerprint tools exist only to satisfy that shape. If
-	// the model calls one anyway, block it with a readable result instead of
-	// letting the turn die on an unknown tool — but ONLY when this session's
-	// in-flight request actually appended them: pi's own real tools must keep
-	// running untouched on normal tool turns.
+	// the model calls one anyway, block it with a reason that names the real
+	// substitute so the model self-corrects on the next attempt ("no action
+	// needed" made it waste turns working around the block instead) — but ONLY
+	// when this session's in-flight request actually appended them: pi's own
+	// real tools keep running untouched on normal tool turns.
 	pi.on("tool_call", (event, ctx) => {
 		const shaping = inFlightShaping.get(sessionIdFor(ctx));
 		if (!shaping || !shaping.shouldBlock(event.toolName)) return;
+		const alias = shaping.aliasFor(event.toolName);
+		const substitute = alias
+			? `\`${alias}\``
+			: event.toolName === "shell"
+				? "`bash`"
+				: "the other tools you have been given";
 		return {
 			block: true,
-			reason: "Placeholder tool added for Zen free-tier compatibility — no action needed.",
+			reason: `pi-zen: \`${event.toolName}\` is a compatibility stub required by the free tier. Call ${substitute} instead.`,
 		};
 	});
 
