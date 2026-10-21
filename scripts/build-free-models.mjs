@@ -22,6 +22,9 @@ import { apiForEndpoint } from "./zen-endpoints.mjs";
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const DOCS_URL = "https://opencode.ai/docs/zen";
+// The gateway is the source of truth for what's actually served; the docs
+// page lags it (see the live filter in main()).
+const INFERENCE_BASE = "https://opencode.ai/inference/v1";
 const MODELS_DEV_URL = "https://models.dev/api.json";
 // Registry (not the GitHub API) so the Action needs no token and no rate budget.
 const OPENCODE_NPM_URL = "https://registry.npmjs.org/opencode-ai/latest";
@@ -202,11 +205,14 @@ const KNOWN_FREE_ALIASES = [
 
 // ─── Step 3: Enrich with models.dev metadata ─────────────────────────────────
 
-function enrichWithMetadata(freeIds, devSlice) {
+function enrichWithMetadata(freeIds, devSlice, liveZenIds) {
 	const models = [];
 
 	for (const entry of freeIds) {
 		const meta = devSlice[entry.id];
+		// Live gate: the gateway is truth; a curated entry it no longer lists
+		// fails on first pick. Skip it at build time.
+		if (liveZenIds && !liveZenIds.has(entry.id)) continue;
 		// Purge deprecated models (models.dev marks them status: "deprecated"):
 		// shipping a dead model means every pick fails until Zen's error, and a
 		// live session can't recover. Skip at build time; the runtime evict-on-
@@ -375,8 +381,25 @@ async function main() {
 		console.error(`⚠️  models.dev fetch failed: ${err.message} — using defaults`);
 	}
 
+	// Live gate: the docs page lags the gateway (2026-10-21: it still listed
+	// exo-free/ll-alpha-free/mimo-v2.5-free/nemotron-3-ultra-free after Zen
+	// stopped serving them). Drop curated entries the public /models endpoint
+	// no longer lists; on fetch failure the docs list stands unfiltered.
+	let liveZenIds = null;
+	try {
+		const zenModels = await fetchJSON(`${INFERENCE_BASE}/models`);
+		liveZenIds = new Set((zenModels?.data ?? []).map((m) => m.id).filter(Boolean));
+		console.error(`🔌 Live gateway lists ${liveZenIds.size} models`);
+	} catch (err) {
+		console.error(`⚠️  Live gateway fetch failed: ${err.message} — skipping live filter`);
+	}
+
 	// Build the output
-	let enriched = enrichWithMetadata(freeModels, devSlice);
+	let enriched = enrichWithMetadata(freeModels, devSlice, liveZenIds);
+	if (enriched.length === 0 && liveZenIds) {
+		console.error("⚠️  Live filter emptied the list — falling back to docs-only list");
+		enriched = enrichWithMetadata(freeModels, devSlice, null);
+	}
 
 	// Apply disabled models from overrides
 	if (overrides.disabledModels.length > 0) {

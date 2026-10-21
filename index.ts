@@ -9,6 +9,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { compact } from "@earendil-works/pi-coding-agent";
 import {
 	streamSimple,
+	getApiProvider,
+	registerApiProvider,
 	type AssistantMessageEventStream,
 	type Context,
 	type Model,
@@ -30,6 +32,7 @@ import {
 	canaryHealth,
 	type CanaryHealth,
 	type CanaryStatus,
+	fillZenIdentityHeaders,
 	fromFreeModelEntry,
 	humanize,
 	opencodeId,
@@ -38,9 +41,12 @@ import {
 	resolveCanaryStatus,
 	isSpeakableApi,
 	shapeZenPayload,
+	shapeZenRequestBody,
+	type ZenDirectOptions,
 	type ZenShapedRequest,
 	validateFreeModelsFile,
 	validOpencodeVersion,
+	zenDirectStreamOptions,
 	ZEN_PROVIDER_ID,
 } from "./shared.js";
 
@@ -437,6 +443,112 @@ function opencodeHeaders(): Record<string, string> {
 	};
 }
 
+// ─── Direct-transport shaping (compat registry wrapper) ──────────────────
+//
+// Calls that bypass pi's agent loop — extension-side registry.complete()
+// (pi-web's fetch summarizer), background memory transports — never fire
+// before_provider_request, so their bodies reach Zen unshaped and the gate
+// answers 403 FreeTierError (verified live 2026-10-21: identical canary
+// headers, shaped body -> 200, unshaped -> 403). Wrap pi-ai's compat
+// registry: for pi-zen models, compose the shipped wire recipe and session
+// identity into the call options; every other provider passes through
+// untouched. Pure composition lives in shared.ts (zenDirectStreamOptions)
+// where node --test can cross the same seam. Registration is keyed by
+// ZEN_COMPAT_SOURCE, so a /reload replaces this wrapper instead of stacking.
+const ZEN_COMPAT_SOURCE = "pi-zen";
+const ZEN_COMPAT_APIS = [
+	"openai-completions",
+	"openai-responses",
+	"anthropic-messages",
+	"google-generative-ai",
+	"systemone",
+] as const;
+let zenCompatInstalled = false;
+
+function installZenCompatTransport(): void {
+	if (zenCompatInstalled) return;
+	for (const api of ZEN_COMPAT_APIS) {
+		const original = getApiProvider(api);
+		if (!original) continue;
+		const origStream = original.stream.bind(original) as (...args: unknown[]) => unknown;
+		const origSimple = original.streamSimple.bind(original) as (...args: unknown[]) => unknown;
+		const wrap =
+			(orig: (...args: unknown[]) => unknown) =>
+			(model: { provider: string }, context: unknown, options: unknown): unknown => {
+				if (model.provider !== PROVIDER_ID) return orig(model, context, options);
+				return orig(
+					model,
+					context,
+					zenDirectStreamOptions(options as ZenDirectOptions | undefined, {
+						fallbackSessionId: FALLBACK_SESSION_ID,
+						shapePayload: (payload) => shapeZenPayload(payload, apiByModelId)?.payload ?? payload,
+					}),
+				);
+			};
+		registerApiProvider(
+			{
+				api,
+				stream: wrap(origStream) as never,
+				streamSimple: wrap(origSimple) as never,
+			} as never,
+			ZEN_COMPAT_SOURCE,
+		);
+	}
+	zenCompatInstalled = true;
+	if (process.env.PI_ZEN_DEBUG) console.error(`[pi-zen] compat wrapper installed for ${ZEN_COMPAT_APIS.length} apis`);
+}
+
+// ── Fetch-edge guard ──
+//
+// The compat wrapper above cannot see pi core's own direct dispatch:
+// ModelRuntime.stream/complete calls `prepared.provider.streamSimple` — the
+// provider layer built from pi.registerProvider — never touching pi-ai's
+// apiProviderRegistry. Requests on that path (pi-web's modelRegistry.complete
+// summarizer, future core flows) reach the network with unshaped bodies and
+// die at the gate with 403 FreeTierError. The only seam left is fetch itself:
+// wrap globalThis.fetch, scoped strictly to BASE_URL bodies whose model is a
+// pi-zen free model, and shape the body there (the pure decision lives in
+// shared.ts shapeZenRequestBody). Everything else — other hosts, non-JSON,
+// foreign models — passes through untouched. Reload-safe: the pristine
+// original is stashed on globalThis and re-wrapped from there, so a reload
+// replaces the guard instead of stacking copies of it.
+const ZEN_FETCH_ORIGINAL_KEY = "__piZenFetchOriginal";
+let fetchGuardInstalled = false;
+
+function installZenFetchGuard(): void {
+	if (fetchGuardInstalled) return;
+	fetchGuardInstalled = true;
+	const host = globalThis as typeof globalThis & { fetch: typeof fetch } & Record<string, unknown>;
+	if (typeof host[ZEN_FETCH_ORIGINAL_KEY] !== "function") {
+		host[ZEN_FETCH_ORIGINAL_KEY] = host.fetch.bind(globalThis);
+	}
+	const original = host[ZEN_FETCH_ORIGINAL_KEY] as typeof fetch;
+	host.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+		try {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : "";
+			const body = init?.body;
+			if (process.env.PI_ZEN_DEBUG && url.startsWith(BASE_URL)) {
+				console.error(`[pi-zen] fetch guard sees ${url} body=${typeof body}${typeof input === "object" && input !== null && !(input instanceof URL) ? " input=Request" : ""}`);
+			}
+			if (!url.startsWith(BASE_URL) || typeof body !== "string") return original(input, init);
+			const shapedBody = shapeZenRequestBody(body, apiByModelId);
+			if (shapedBody === undefined) return original(input, init);
+			const raw = init?.headers;
+			const callerHeaders =
+				raw && typeof (raw as Headers).forEach === "function"
+					? Object.fromEntries(new Headers(raw as Headers).entries())
+					: ((raw as Record<string, string> | undefined) ?? {});
+			return original(url, {
+				...init,
+				body: shapedBody,
+				headers: fillZenIdentityHeaders(callerHeaders, FALLBACK_SESSION_ID),
+			});
+		} catch {
+			return original(input, init);
+		}
+	}) as typeof fetch;
+}
+
 // humanize() and fromFreeModelEntry() imported from ./shared.ts.
 
 // ─── Fetchers (TTL-cached) ───────────────────────────────────────────────────
@@ -660,10 +772,34 @@ async function resolveModels(): Promise<ZenModelConfig[]> {
 	if (curated.length === 0) {
 		throw new Error("Curated free-models list is empty");
 	}
-	const configs = curated.map(fromFreeModelEntry);
+	// Live gate: the curated list comes from the docs page, which lags the
+	// gateway (2026-10-21: docs still listed exo/ll-alpha/mimo-v2.5/nemotron-
+	// 3-ultra after Zen stopped serving them). Filtering against the public
+	// /models endpoint drops dead entries BEFORE a user picks one; on fetch
+		// failure the curated list stands unfiltered (last-known-good wins, the
+		// evict-on-error loop is the fallback net).
+		const liveIds = await fetchLiveZenModelIds();
+		const list = liveIds ? curated.filter((e) => liveIds.has(e.id)) : curated;
+		if (list.length === 0) {
+			throw new Error("Live gate filtered every curated model");
+		}
+	const configs = list.map(fromFreeModelEntry);
 	lastGood = configs;
 	writeSnapshot(configs);
 	return configs;
+}
+
+/**
+ * Live gateway ids, or null when the fetch fails (filter is skipped, not
+ * fatal — an unreachable gateway must not empty the picker).
+ */
+async function fetchLiveZenModelIds(): Promise<Set<string> | null> {
+	try {
+		const models = await fetchZenModels();
+		return new Set(models.map((m) => m.id));
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -986,6 +1122,16 @@ export default async function (pi: ExtensionAPI) {
 	// let the refresh below replace the list if the live one differs.
 	// Registration is idempotent: refreshAndRegister makes the same call.
 	registerProvider(pi, knownModelsSync());
+
+	// Cover direct completions too (registry.complete / streamSimple from any
+	// extension): without this, web-fetch-style summarize calls on a pi-zen
+	// model ship unshaped bodies and die at the gate (see the wrapper's block
+	// comment). Sync and cheap — no network, just registry entries.
+	installZenCompatTransport();
+	// And cover pi core's own dispatch (ModelRuntime -> prepared.provider),
+	// which bypasses the registry entirely — the fetch edge is the only seam
+	// it exposes.
+	installZenFetchGuard();
 
 	// Refresh from the network. Replaces the seed if the live list differs.
 	await refreshAndRegister(pi);

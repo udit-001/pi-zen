@@ -1022,3 +1022,108 @@ export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenS
 	delete obj.prompt_cache_retention;
 	return ensureZenFreeTierShape(obj, api) ?? undefined;
 }
+
+// ─── Direct-transport shaping (compat seam) ──────────────────────────────────
+//
+// pi's agent loop shapes every turn via before_provider_request. Calls that
+// bypass pi entirely — extension-side registry.complete() (pi-web's fetch
+// summarizer), background memory transports — reach the gateway with an
+// unshaped body and die with 403 FreeTierError, because the gate checks the
+// BODY, not just headers (verified live 2026-10-21: identical canary headers,
+// shaped body -> 200, unshaped -> 403). index.ts wraps pi-ai's compat
+// registry for pi-zen models; the pure composition decisions live here where
+// node --test can cross the same seam callers use.
+
+/** Structural slice of pi-ai's StreamOptions this module touches. */
+export interface ZenDirectOptions {
+	headers?: Record<string, string>;
+	sessionId?: string;
+	onPayload?: (payload: unknown, model: unknown) => unknown | undefined | Promise<unknown | undefined>;
+	[key: string]: unknown;
+}
+
+/** Session-correlation headers Zen-bound requests are expected to carry. */
+const ZEN_IDENTITY_HEADER_NAMES = [
+	"x-opencode-session",
+	"x-opencode-session-id",
+	"x-session-affinity",
+	"x-session-id",
+] as const;
+
+/**
+ * Overwrite ALL session-correlation headers with the effective session id and
+ * return the copy (input never mutated). Overwrite — not fill-gaps — is the
+ * gate's requirement: pi core stamps x-session-id/x-session-affinity/
+ * x-opencode-session-id from options.sessionId (the raw pi UUID on direct
+ * paths), and any non-ses_ value in the family poisons the request
+ * (2026-10-21: fill-gaps kept pi's UUIDs -> 403 FreeTierError; overwrite ->
+ * 200). A caller cannot manage its own affinity here — the gateway only
+ * accepts opencode-shaped ids, which is exactly what `sessionId` is.
+ */
+export function fillZenIdentityHeaders(
+	headers: Record<string, string> | undefined,
+	sessionId: string,
+): Record<string, string> {
+	const out = { ...(headers ?? {}) };
+	for (const name of ZEN_IDENTITY_HEADER_NAMES) {
+		out[name] = sessionId;
+	}
+	return out;
+}
+
+/**
+ * Compose direct-call options for a pi-zen model: default the session id,
+ * stamp ALL identity headers with the EFFECTIVE session id (the caller's
+ * sessionId option if it passed one, else the fallback), and wrap onPayload
+ * so the outgoing payload is shaped by the shipped wire recipe before any
+ * caller hook sees it. Non-identity caller keys win. Pure — index.ts's
+ * registry wrapper supplies
+ * the deps.
+ */
+export function zenDirectStreamOptions<T extends ZenDirectOptions>(
+	options: T | undefined,
+	deps: { fallbackSessionId: string; shapePayload: (payload: unknown) => unknown },
+): T {
+	const sessionId = options?.sessionId || deps.fallbackSessionId;
+	const caller = (options ?? {}) as T;
+	const prevOnPayload = caller.onPayload;
+	return {
+		...caller,
+		sessionId,
+		headers: fillZenIdentityHeaders(caller.headers, sessionId),
+		onPayload: (payload: unknown, model: unknown) => {
+			const shaped = deps.shapePayload(payload);
+			const effective = shaped === undefined ? payload : shaped;
+			if (!prevOnPayload) return effective;
+			const result = prevOnPayload(effective, model);
+			if (result && typeof (result as Promise<unknown>).then === "function") {
+				return Promise.resolve(result).then((r) => (r === undefined ? effective : r));
+			}
+			return result === undefined ? effective : result;
+		},
+	};
+}
+
+/**
+ * Shape a serialized request body aimed at a pi-zen free model — the fetch-edge
+ * counterpart to zenDirectStreamOptions. pi core's ModelRuntime dispatch
+ * bypasses before_provider_request AND the compat registry, so the only seam
+ * left is the network call itself (see installZenFetchGuard in index.ts).
+ * Returns the re-serialized shaped body, or undefined when the body isn't a
+ * shapable pi-zen request (non-JSON, foreign model) — the caller passes those
+ * through untouched. Shaping converges: an already-shaped body re-enters
+ * ensureZenFreeTierShape and comes back equal.
+ */
+export function shapeZenRequestBody(body: string, apiLookup: ZenApiLookup): string | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const model = (parsed as { model?: unknown }).model;
+	if (typeof model !== "string" || !apiLookup.get(model)) return undefined;
+	const shaped = shapeZenPayload(parsed, apiLookup);
+	return JSON.stringify(shaped?.payload ?? parsed);
+}
