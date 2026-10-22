@@ -27,7 +27,9 @@ const DOCS_URL = "https://opencode.ai/docs/zen";
 const INFERENCE_BASE = "https://opencode.ai/inference/v1";
 const MODELS_DEV_URL = "https://models.dev/api.json";
 // Registry (not the GitHub API) so the Action needs no token and no rate budget.
-const OPENCODE_NPM_URL = "https://registry.npmjs.org/opencode-ai/latest";
+// opencode renamed its npm package: opencode-ai is frozen at 1.19.4,
+// @opencode/cli is the live one. Query the encoded scoped name.
+const OPENCODE_NPM_URL = "https://registry.npmjs.org/@opencode%2fcli/latest";
 const FETCH_TIMEOUT_MS = 15_000;
 
 // Endpoint → pi api family lives in ./zen-endpoints.mjs (shared with the
