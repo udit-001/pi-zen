@@ -36,8 +36,8 @@ test("fillZenIdentityHeaders fills all four correlation headers from the session
 test("fillZenIdentityHeaders OVERWRITES all four correlation headers with the session id", () => {
 	// pi core pre-populates the UUID-shaped trio on the direct path (options.sessionId
 	// -> x-session-id/x-session-affinity/x-opencode-session-id). Any non-ses_ value
-	// in the family trips the gate (2026-10-21: fill-gaps kept the UUIDs -> 403;
-	// overwrite -> 200 x3). Non-identity headers are preserved.
+	// in the family trips the gate (fill-gaps kept the UUIDs and drew 403).
+	// Non-identity headers are preserved.
 	const UUID = "01a15d2d-2e03-7106-814a-f6bc1f8ce280";
 	const out = fillZenIdentityHeaders(
 		{ "x-opencode-session": "ses_mine", "x-opencode-session-id": UUID, "x-session-affinity": UUID, "x-session-id": UUID, "x-foo": "1" },

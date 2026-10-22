@@ -15,7 +15,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { canaryHealth, canaryVerdict, resolveCanaryStatus } from "../shared.ts";
 
-// ─── canaryVerdict (workflow exit code) ─────────────────────────────────────
+// canaryVerdict (workflow exit code)
 
 test("any 200 passes — first served model settles the verdict", () => {
 	assert.equal(canaryVerdict([200]), "pass");
@@ -39,7 +39,7 @@ test("network errors and server errors fail — no candidate served", () => {
 	assert.equal(canaryVerdict([403, -1, 500]), "fail");
 });
 
-// ─── canaryHealth (extension registration gate) ─────────────────────────────
+// canaryHealth (extension registration gate)
 
 const NOW = 1_800_000_000_000;
 const status = (verdict: string, ageMs = 0) => ({
@@ -78,10 +78,10 @@ test("missing or malformed status is unknown", () => {
 	assert.equal(canaryHealth({ verdict: "fail", checkedAt: "not-a-date" }, NOW), "unknown");
 });
 
-// ─── resolveCanaryStatus (mirror vs origin trust policy) ────────────────────
+// resolveCanaryStatus (mirror vs origin trust policy)
 
-// The Oct 2026 incident: the data branch had re-passed but jsdelivr's edge
-// kept serving the stale "fail" for hours, hiding the models.
+// The incident behind this policy: the data branch had re-passed but
+// jsdelivr's edge kept serving the stale "fail" for hours, hiding the models.
 test("fresh origin pass beats a stale mirror fail", () => {
 	const mirror = status("fail");
 	const origin = status("pass");

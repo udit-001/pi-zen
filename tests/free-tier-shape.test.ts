@@ -3,10 +3,10 @@
  * Runs with `node --test` — Node >= 22.18 strips types natively, so no
  * build step or test framework is needed. These cross exactly the same seam
  * callers use (ensureZenFreeTierShape / shapeZenPayload / sanitizeZenResponsesItems)
- * and pin the v2 recipe verified upstream (9router #4842/#4805, Oct 2026):
- * exact read/shell fingerprint tools, wire-def swap for compatible caller
- * tools (alias concealment as fallback), no tool_choice
- * "none", system-note, and the reasoning_content placeholder.
+ * and pin the v2 recipe verified upstream: exact read/shell fingerprint
+ * tools, wire-def swap for compatible caller tools (alias concealment as
+ * fallback), no tool_choice "none", system-note, and the reasoning_content
+ * placeholder.
  */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -304,7 +304,7 @@ test("the fingerprint name constant is exactly opencode's read/shell pair", () =
 	assert.deepEqual(ZEN_FINGERPRINT_TOOL_NAMES, ["read", "shell"]);
 });
 
-// ─── shapeZenPayload (compaction path) ──────────────────────────────────────
+// shapeZenPayload (compaction path)
 //
 // pi's compaction requests bypass before_provider_request (no onPayload on
 // that path), so the session_before_compact handler shapes its own payload

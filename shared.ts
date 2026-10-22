@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 
-// ─── Provider identity ───────────────────────────────────────────────────────
+// Provider identity
 
 /**
  * The provider id this extension registers. Lives here rather than in index.ts
@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
  */
 export const ZEN_PROVIDER_ID = "pi-zen";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// Types
 
 /**
  * pi API families Zen serves. Determines which endpoint/model config pi uses.
@@ -166,7 +166,7 @@ export type OpenAICompletionsModelCompat = {
  */
 export type ModelCompat = OpenAICompletionsModelCompat | Record<string, never>;
 
-// ─── Pure helpers ────────────────────────────────────────────────────────────
+// Pure helpers
 
 export function humanize(id: string): string {
 	return id
@@ -225,7 +225,7 @@ export function fromFreeModelEntry(entry: FreeModelEntry): ZenModelConfig {
 	};
 }
 
-// ─── Validation ──────────────────────────────────────────────────────────────
+// Validation
 
 /**
  * Lightweight structural validation for a parsed free-models.json.
@@ -266,7 +266,7 @@ export function validateFreeModelsFile(data: unknown): data is FreeModelsFile {
 	return true;
 }
 
-// ─── OpenCode wire parity ────────────────────────────────────────────────────
+// OpenCode wire parity
 //
 // Captured from a live opencode v1.18.31 request (its Zen baseUrl pointed at a
 // local logger):
@@ -290,17 +290,15 @@ export function validateFreeModelsFile(data: unknown): data is FreeModelsFile {
 // Zen also gates its free tier on request *shape* (see ensureZenFreeTierShape):
 // a free-model call is served only when it streams and carries tools.
 //
-// Since OpenCode v2 (2026-10-14, 9router #4842) the server enforces the v2
-// User-Agent shape: `opencode/<channel>/<major>.x.y/<client>` with major >= 2.
-// The v1 form (`opencode/1.18.x`, optionally with the AI-SDK suffix) is
-// rejected with 403 FreeTierError, as is any `x-opencode-request` header.
-// Every `x-opencode-session` must still match
+// OpenCode v2 (verified upstream, 9router #4842) enforces the v2 User-Agent
+// shape: `opencode/<channel>/<major>.x.y/<client>` with major >= 2. The v1
+// form (`opencode/1.18.x`, optionally with the AI-SDK suffix) is rejected
+// with 403 FreeTierError, as is any `x-opencode-request` header. Every
+// `x-opencode-session` must still match
 // /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/ with a *descending* (bit-inverted)
-// timestamp — see opencodeId. The captured pair above is the live evidence:
-// `ses_` starts f4f5… exactly because it is the ~complement of the msg_ id's
-// 0b0a… timestamp from the same request burst.
+// timestamp — see opencodeId.
 
-/** Verified-good opencode v2 identity parts (from the 2.0.26 CLI, via 9router #4842). */
+/** Verified-good opencode v2 identity parts (from the 2.0.26 CLI). */
 export const OPENCODE_UA_CHANNEL = "latest";
 export const OPENCODE_UA_VERSION = "2.0.26";
 export const OPENCODE_UA_CLIENT = "cli";
@@ -351,17 +349,15 @@ const ID_TIME_SHIFT = 0x1000n;
  *
  * Prefix encoding matches upstream (packages/schema/src/identifier.ts):
  *   - `ses` encodes `~current` (descending): session ids sort newest-first, and
- *     OpenCode's server validates the canonical descending `ses_` shape — the
- *     9router fix (PR #4105) shipped exactly this change after ascending/UUID
- *     sessions started drawing 403 FreeTierError.
+ *     OpenCode's server validates the canonical descending `ses_` shape;
+ *     ascending sessions draw 403 FreeTierError.
  *   - `msg` encodes `current` (ascending): request ids sort oldest-first.
  *
  * Caller contract (not enforced — wrong values corrupt the time field):
  *   - `counter` must be a real per-millisecond count and stay SMALL: v2
- *     decodes it and rejects values >= ~100 with 403 FreeTierError (9router
- *     #4842 live probes: 0–16 pass, >= 100 fail). Callers reset a per-ms
- *     counter every millisecond (see nextRequestId in index.ts); a session id
- *     minted once per conversation uses 0.
+ *     decodes it and rejects values >= ~100 with 403 FreeTierError. Callers
+ *     reset a per-ms counter every millisecond (see nextRequestId in
+ *     index.ts); a session id minted once per conversation uses 0.
  *   - `random` must carry at least 14 bytes (exactly the first 14 are used)
  */
 export function opencodeId(
@@ -422,7 +418,7 @@ export function projectIdFromRemote(remoteUrl: string): string | undefined {
 	return normalized ? createHash("sha1").update(`git-remote:${normalized}`).digest("hex") : undefined;
 }
 
-// ─── Zen canary ─────────────────────────────────────────────────────────────
+// Zen canary
 //
 // The canary (scripts/canary.mjs, run daily by .github/workflows/canary.yml)
 // is the authority on whether the shipped wire recipe still passes Zen's
@@ -434,7 +430,6 @@ export function projectIdFromRemote(remoteUrl: string): string | undefined {
 //     keeps the free models OUT of the /model picker and replaces the
 //     session-start message with one honest warning, instead of letting
 //     every turn fail with a raw 403.
-//
 // Freshness policy: a verdict older than CANARY_STALE_MS (or a missing /
 // malformed status file) is "unknown" — absence of evidence is not breakage,
 // so the models register and behave exactly as today; the in-session 403 copy
@@ -455,10 +450,6 @@ export type CanaryStatus = {
 export type CanaryHealth = "healthy" | "broken" | "unknown";
 
 /**
- * Classify a canary status for the registration gate. Pure: the caller owns
- * fetching (index.ts) and the test owns the clock.
- */
-/**
  * A canary status that passed the shape + freshness gate, or undefined.
  * Internal: the one definition of a usable read, shared by canaryHealth and
  * resolveCanaryStatus so the two can never disagree about what "fresh" means.
@@ -477,6 +468,10 @@ function asFreshCanaryStatus(
 	return { verdict, checkedAt };
 }
 
+/**
+ * Classify a canary status for the registration gate. Pure: the caller owns
+ * fetching (index.ts) and the test owns the clock.
+ */
 export function canaryHealth(status: unknown, now: number): CanaryHealth {
 	const fresh = asFreshCanaryStatus(status, now);
 	if (!fresh) return "unknown";
@@ -492,8 +487,8 @@ export function canaryHealth(status: unknown, now: number): CanaryHealth {
  * its purge API fires) and raw.githubusercontent.com (Fastly, max-age=300 —
  * at most ~5 min stale). On differing verdicts the origin read is the
  * fresher evidence: the mirror can pin a dead "fail" for half a day after
- * the free tier recovered (Oct 2026 — the gate hid the models for hours
- * after the canary had re-passed) or a dead "pass" after a real gate change.
+ * the free tier recovered (it once hid the models for hours after the
+ * canary had re-passed) or a dead "pass" after a real gate change.
  * A stale or unusable origin read defers to the mirror untouched, and the
  * returned status still goes through canaryHealth, so this never publishes
  * a verdict the gate would call "unknown". Pure: the caller owns fetching.
@@ -506,12 +501,11 @@ export function resolveCanaryStatus(mirror: unknown, origin: unknown, now: numbe
 	return fromMirror.verdict === fromOrigin.verdict ? mirror : origin;
 }
 
-// ─── Canary run verdict ─────────────────────────────────────────────────────
+// Canary run verdict
 //
 // The alert policy for scripts/canary.mjs, the daily live probe of the
-// free-tier gate (the regression class unit tests cannot catch — the Oct 2026
-// 403 arrived with every test green). Classification, pure so tests can pin
-// it (tests/canary-verdict.test.ts):
+// free-tier gate (the regression class unit tests cannot catch). Classification,
+// pure so tests can pin it (tests/canary-verdict.test.ts):
 //
 //   "pass"          — at least one candidate served with the shipped recipe
 //   "inconclusive"  — every candidate rate-limited (429): anonymous access is
@@ -534,10 +528,10 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 	return "fail";
 }
 
-// ─── Zen free-tier request shape ────────────────────────────────────────────
+// Zen free-tier request shape
 //
 // Zen serves its free models only to requests that look like opencode v2 CLI
-// traffic. Verified upstream (9router #4842, Oct 2026), the gate is:
+// traffic. Verified upstream, the gate is:
 //
 //   stream:true  AND  a `tools` array carrying opencode's own `read` and
 //                     `shell` tools with their EXACT v2 descriptions and
@@ -569,15 +563,15 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 //      alone, since pi has no tool of that name;
 //   3. appends a system note telling the model the appended tools are
 //      placeholders. Wording matters: without the old "must not be used"
-//      descriptions the model does call the appended tools (live probe:
-//      `read` on "what files are in /etc?"), and "not available" made it also
-//      refuse the caller's own Read tool — the note names the real substitute
-//      (`bash` for commands) so a stray call self-corrects on the next try;
+//      descriptions the model calls the appended tools, and "not available"
+//      made it also refuse the caller's own Read tool — the note names the
+//      real substitute (`bash` for commands) so a stray call self-corrects
+//      on the next try;
 //   4. injects a `reasoning_content` placeholder into assistant history
 //      messages that lack one: Zen reasoning models reject multi-turn chats
 //      without it (400 missing_required_parameter), and the response pipeline
 //      strips the field before it reaches the client, so the echo can never
-//      come from the client (9router #4805).
+//      come from the client.
 //
 // The return value carries the response-side half of the recipe: shouldBlock
 // (block calls to the placeholders), restoreToolName (map aliases back to the
@@ -587,7 +581,7 @@ export function canaryVerdict(statuses: number[]): "pass" | "inconclusive" | "fa
 /** The tool names Zen's free tier requires in `tools`: opencode's own. */
 export const ZEN_FINGERPRINT_TOOL_NAMES = ["read", "shell"] as const;
 
-// Verbatim from the OpenCode v2.0.26 CLI (9router #4842). Upstream compares
+// Verbatim from the OpenCode v2.0.26 CLI. Upstream compares
 // description and parameters, so do not reword or reformat these. Exported
 // for tests and callers that must build a definition-exact tool.
 export const ZEN_FINGERPRINT_DEFINITIONS: Record<
@@ -801,7 +795,7 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenSha
 	if (api === "openai-responses") {
 		obj.store = false;
 		// "auto" is the only tool_choice upstream accepts on the Responses lane,
-		// and it must always be present (9router #4842).
+		// and it must always be present.
 		obj.tool_choice = "auto";
 		sanitizeZenResponsesItems(obj);
 	} else if (obj.tool_choice === "none") {
@@ -869,7 +863,7 @@ export function ensureZenFreeTierShape(payload: unknown, api?: ModelApi): ZenSha
 	//    carries reasoning as separate input items, Anthropic as thinking
 	//    blocks). Injected for every Zen chat model: upstream ships the rule
 	//    provider-wide because non-reasoning models ignore the field while
-	//    reasoning models 400 without it (9router #4805, scope "all").
+	//    reasoning models 400 without it (scope "all").
 	if (api !== "openai-responses" && api !== "anthropic-messages" && Array.isArray(obj.messages)) {
 		obj.messages = (obj.messages as Record<string, unknown>[]).map((m) => {
 			const rc = m?.reasoning_content;
@@ -1023,13 +1017,13 @@ export function shapeZenPayload(payload: unknown, apiLookup: ZenApiLookup): ZenS
 	return ensureZenFreeTierShape(obj, api) ?? undefined;
 }
 
-// ─── Direct-transport shaping (compat seam) ──────────────────────────────────
+// Direct-transport shaping (compat seam)
 //
 // pi's agent loop shapes every turn via before_provider_request. Calls that
 // bypass pi entirely — extension-side registry.complete() (pi-web's fetch
 // summarizer), background memory transports — reach the gateway with an
 // unshaped body and die with 403 FreeTierError, because the gate checks the
-// BODY, not just headers (verified live 2026-10-21: identical canary headers,
+// BODY, not just headers (verified live: identical canary headers,
 // shaped body -> 200, unshaped -> 403). index.ts wraps pi-ai's compat
 // registry for pi-zen models; the pure composition decisions live here where
 // node --test can cross the same seam callers use.
@@ -1056,7 +1050,7 @@ const ZEN_IDENTITY_HEADER_NAMES = [
  * gate's requirement: pi core stamps x-session-id/x-session-affinity/
  * x-opencode-session-id from options.sessionId (the raw pi UUID on direct
  * paths), and any non-ses_ value in the family poisons the request
- * (2026-10-21: fill-gaps kept pi's UUIDs -> 403 FreeTierError; overwrite ->
+ * (fill-gaps kept pi's UUIDs -> 403 FreeTierError; overwrite ->
  * 200). A caller cannot manage its own affinity here — the gateway only
  * accepts opencode-shaped ids, which is exactly what `sessionId` is.
  */
@@ -1077,8 +1071,7 @@ export function fillZenIdentityHeaders(
  * sessionId option if it passed one, else the fallback), and wrap onPayload
  * so the outgoing payload is shaped by the shipped wire recipe before any
  * caller hook sees it. Non-identity caller keys win. Pure — index.ts's
- * registry wrapper supplies
- * the deps.
+ * registry wrapper supplies the deps.
  */
 export function zenDirectStreamOptions<T extends ZenDirectOptions>(
 	options: T | undefined,

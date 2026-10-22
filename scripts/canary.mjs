@@ -1,8 +1,8 @@
 /**
  * Live canary for the Zen free tier — the regression class unit tests cannot
- * catch. The 403 we fixed (Oct 2026) came from an upstream wire change while
- * every test stayed green; this script replays the shipped wire recipe against
- * opencode.ai and exits nonzero when the gate rejects it.
+ * catch. A past 403 came from an upstream wire change while every test stayed
+ * green; this script replays the shipped wire recipe against opencode.ai and
+ * exits nonzero when the gate rejects it.
  *
  * Drift-proof by construction: the request body is shaped by the SAME
  * `shapeZenPayload` the extension ships (fingerprint tools, aliasing,
@@ -29,10 +29,9 @@ import {
 } from "../shared.ts";
 
 /**
- * One live probe against the free tier. The request body is shaped by the
- * shipped `shapeZenPayload` (fingerprint tools, tool_choice rules, cache-field
- * stripping all come from shared.ts) — exactly what a real tool-less pi turn
- * sends. Verdict classification is `canaryVerdict` from shared.ts, pinned by
+ * One live probe against the free tier, shaped exactly like a tool-less pi
+ * turn (see the block comment at the payload construction). Verdict
+ * classification is `canaryVerdict` from shared.ts, pinned by
  * tests/canary-verdict.test.ts; exit 0 = pass/inconclusive, 1 = page.
  */
 async function main() {

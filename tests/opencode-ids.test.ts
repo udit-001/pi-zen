@@ -1,19 +1,18 @@
 /**
  * Unit tests for opencode id minting (shared.ts opencodeId).
  *
- * Pins the session-id scheme Zen's free tier actually validates. Verified live
- * against opencode.ai/zen/v1 (Oct 2026): a `ses_...` whose 12-hex time field is
- * hash-derived (pi-zen's old opencodeIdFromSeed) draws 403 FreeTierError, while
- * timestamp-derived ids pass — so these tests pin, at the same exported seam
- * callers use, that the time field is derived from the mint timestamp (varies
- * with it) and that ses/msg stay bitwise complements (the descending/ascending
- * pairing upstream validates).
+ * Pins the session-id scheme Zen's free tier actually validates: a `ses_...`
+ * whose 12-hex time field is hash-derived (pi-zen's old scheme) draws 403
+ * FreeTierError, while timestamp-derived ids pass. These tests pin, at the
+ * same exported seam callers use, that the time field is derived from the mint
+ * timestamp (varies with it) and that ses/msg stay bitwise complements (the
+ * descending/ascending pairing upstream validates).
  */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { opencodeId } from "../shared.ts";
 
-/** The `ses_`/`msg_` shape OpenCode's server validates (9router PR #4105). */
+/** The `ses_`/`msg_` shape OpenCode's server validates. */
 const ID_SHAPE = /^(ses|msg)_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 
 /** An id's 12-hex time field as bytes, most significant first. */

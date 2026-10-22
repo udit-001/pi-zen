@@ -50,7 +50,7 @@ import {
 	ZEN_PROVIDER_ID,
 } from "./shared.js";
 
-// ─── Configuration ───────────────────────────────────────────────────────────
+// Configuration
 //
 // OpenCode Zen is the OpenCode team's curated AI gateway:
 //   https://opencode.ai/zen
@@ -95,8 +95,7 @@ import {
 // IP-rate-limited access to the free models. A key is still recommended: it
 // ties usage to your workspace instead of the shared anonymous bucket.
 //
-// Wire parity with opencode v2 (verified upstream, 9router #4842; see
-// shared.ts "OpenCode wire parity"):
+// Wire parity with opencode v2 (see shared.ts "OpenCode wire parity"):
 //   User-Agent (v2 shape: opencode/<channel>/<version>/<client>),
 //   x-opencode-client, x-opencode-project, x-opencode-session,
 //   x-opencode-session-id / x-session-affinity / x-session-id (same value)
@@ -111,10 +110,9 @@ import {
 // tools under `_client` aliases), the same recipe 9router ships (see
 // ensureZenFreeTierShape in shared.ts).
 //
-// The `x-opencode-session` id must additionally carry a *plausible timestamp*
-// in its 12 hex chars, with a small per-millisecond counter: hash-derived ids
-// decode to garbage and large counters draw 403 (verified live Oct 2026 —
-// see sessionIdFor and nextRequestId).
+// The `x-opencode-session` id must additionally carry a plausible epoch-ms
+// timestamp with a small per-millisecond counter — see sessionIdFor and
+// nextRequestId.
 
 const PROVIDER_ID = ZEN_PROVIDER_ID;
 const PROVIDER_NAME = "OpenCode Zen (Free)";
@@ -124,8 +122,8 @@ const PROVIDER_NAME = "OpenCode Zen (Free)";
 const ZEN_ANONYMOUS_API_KEY = "public";
 // ZEN_BASE_URL override lets you route through a proxy / local gateway (and is
 // handy for testing). MODELS_URL derives from it. The free tier moved from
-// /zen/v1 to /inference/v1 with OpenCode v2 (9router #4842); /zen/v1 now
-// answers every free request with 403 FreeTierError.
+// /zen/v1 to /inference/v1 with OpenCode v2; /zen/v1 now 403s every free
+// request.
 const BASE_URL = process.env.ZEN_BASE_URL || "https://opencode.ai/inference/v1";
 const MODELS_URL = `${BASE_URL}/models`;
 // Curated free-model list — maintained by the GitHub Action in
@@ -159,7 +157,7 @@ const FREE_MODELS_CDN_TTL_MS = 3_600_000;
 const CANARY_STATUS_TTL_MS = 3_600_000;
 const FETCH_TIMEOUT_MS = 8_000;
 
-// ─── opencode parity (pi → Zen requests look like opencode requests) ────────
+// opencode parity (pi → Zen requests look like opencode requests)
 
 // Mimic the opencode CLI on the wire so Zen serves the free models exactly as
 // it does for opencode. The full capture this mirrors — header names, value
@@ -181,9 +179,9 @@ const OPENCODE_CLIENT = process.env.OPENCODE_CLIENT || "cli";
 // Process-wide fallback session id, used when no pi session id is available yet.
 const FALLBACK_SESSION_ID = opencodeId("ses", Date.now(), 0, randomBytes(14));
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-// FreeModelEntry, FreeModelsFile, ZenModelConfig imported from ./shared.ts.
-// ZenModel is extension-local (the raw { id } from Zen's /models endpoint).
+// Types
+// FreeModelEntry, FreeModelsFile, ZenModelConfig come from ./shared.js; ZenModel
+// is extension-local (the raw { id } from Zen's /models endpoint).
 
 type ZenModel = {
 	id: string;
@@ -194,7 +192,7 @@ type Snapshot = {
 	models: ZenModelConfig[];
 };
 
-// ─── State ───────────────────────────────────────────────────────────────────
+// State
 
 let zenCache: { expiresAt: number; models: ZenModel[] } | null = null;
 /**
@@ -222,11 +220,11 @@ let freeModelsRevalidate: Promise<void> | null = null;
 let freeModelsUpdatedAt = 0;
 /** Last fully-resolved config set (successful resolve, or snapshot load). */
 let lastGood: ZenModelConfig[] | null = null;
-/** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped by validOpencodeVersion: the v2 server rejects v1-shaped UAs with 403 FreeTierError, so anything below major 2 clamps to the pinned verified-good version. */
+/** opencode version from free-models.json — keeps the User-Agent from going stale. Clamped by validOpencodeVersion: below major 2 clamps to the pinned verified-good version. */
 let opencodeVersion: string | undefined;
 /** Resolved on first use: the project id opencode would compute for this cwd. */
 let projectId: string | null = null;
-/** Per-millisecond request counter for opencode-style ascending ids. v2 decodes the counter and rejects values >= ~100 with 403 FreeTierError, so it resets every millisecond and stays tiny (see nextRequestId). */
+/** Per-millisecond request counter for opencode-style ascending ids. v2 rejects values >= ~100 with 403 FreeTierError, so it resets every millisecond and stays tiny (see nextRequestId). */
 let lastRequestMs = 0;
 let msRequestCounter = 0;
 /**
@@ -246,7 +244,7 @@ let apiByModelId: ReadonlyMap<string, ModelApi> = new Map();
  */
 const inFlightShaping = new Map<string, ZenShapedRequest>();
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -346,7 +344,7 @@ function getApiKey(): string {
 	return getStoredKey() || process.env.ZEN_API_KEY || "";
 }
 
-// ─── OpenCode identity ───────────────────────────────────────────────────────
+// OpenCode identity
 //
 // The header values opencode computes per process/session/request. Kept honest
 // rather than constant: the project id is derived from this repo's git remote
@@ -380,15 +378,11 @@ function resolveProjectId(): string {
  * `ses_...` for the current pi session, stable across requests so Zen's sticky
  * routing and prompt cache stay warm within one conversation.
  *
- * The id must carry a *plausible epoch-ms timestamp* in its 12 hex chars.
- * Verified live (Oct 2026): a ses_ whose time field derives from a hash of the
- * session id — pi-zen's previous opencodeIdFromSeed scheme, borrowed from
- * 9router's translateSessionId — draws 403 FreeTierError, while any real
- * timestamp passes (7 days old verified 200). Zen evidently decodes the field
- * and rejects values that are not a plausible ms-since-epoch. So the id is
- * minted from Date.now() — the same scheme as 9router's generateSessionId —
- * exactly once per pi session and cached; sessions never outlive the
- * timestamp's validity (tested to 7 days).
+ * The id must carry a *plausible epoch-ms timestamp* in its 12 hex chars: a
+ * ses_ whose time field derives from a hash of the session id (pi-zen's old
+ * scheme) draws 403 FreeTierError — Zen evidently decodes the field and
+ * rejects implausible timestamps — while a real Date.now() passes. So the id
+ * is minted from Date.now() exactly once per pi session and cached.
  */
 const sessionIds = new Map<string, string>();
 
@@ -443,13 +437,13 @@ function opencodeHeaders(): Record<string, string> {
 	};
 }
 
-// ─── Direct-transport shaping (compat registry wrapper) ──────────────────
+// Direct-transport shaping (compat registry wrapper)
 //
 // Calls that bypass pi's agent loop — extension-side registry.complete()
 // (pi-web's fetch summarizer), background memory transports — never fire
 // before_provider_request, so their bodies reach Zen unshaped and the gate
-// answers 403 FreeTierError (verified live 2026-10-21: identical canary
-// headers, shaped body -> 200, unshaped -> 403). Wrap pi-ai's compat
+// answers 403 FreeTierError (verified live: identical canary headers,
+// shaped body -> 200, unshaped -> 403). Wrap pi-ai's compat
 // registry: for pi-zen models, compose the shipped wire recipe and session
 // identity into the call options; every other provider passes through
 // untouched. Pure composition lives in shared.ts (zenDirectStreamOptions)
@@ -498,7 +492,7 @@ function installZenCompatTransport(): void {
 	if (process.env.PI_ZEN_DEBUG) console.error(`[pi-zen] compat wrapper installed for ${ZEN_COMPAT_APIS.length} apis`);
 }
 
-// ── Fetch-edge guard ──
+// Fetch-edge guard
 //
 // The compat wrapper above cannot see pi core's own direct dispatch:
 // ModelRuntime.stream/complete calls `prepared.provider.streamSimple` — the
@@ -549,9 +543,7 @@ function installZenFetchGuard(): void {
 	}) as typeof fetch;
 }
 
-// humanize() and fromFreeModelEntry() imported from ./shared.ts.
-
-// ─── Fetchers (TTL-cached) ───────────────────────────────────────────────────
+// Fetchers (TTL-cached)
 
 /** Live model ids from Zen. The endpoint is public — no API key required. */
 async function fetchZenModels(force = false): Promise<ZenModel[]> {
@@ -754,7 +746,7 @@ function canonicalJsonString(value: unknown): string {
 	return JSON.stringify(value) ?? "null";
 }
 
-// ─── Resolution ──────────────────────────────────────────────────────────────
+// Resolution
 
 /**
  * Resolve the free-model config set.
@@ -773,11 +765,10 @@ async function resolveModels(): Promise<ZenModelConfig[]> {
 		throw new Error("Curated free-models list is empty");
 	}
 	// Live gate: the curated list comes from the docs page, which lags the
-	// gateway (2026-10-21: docs still listed exo/ll-alpha/mimo-v2.5/nemotron-
-	// 3-ultra after Zen stopped serving them). Filtering against the public
-	// /models endpoint drops dead entries BEFORE a user picks one; on fetch
-		// failure the curated list stands unfiltered (last-known-good wins, the
-		// evict-on-error loop is the fallback net).
+	// gateway — dead entries linger after Zen stops serving them. Filtering
+	// against the public /models endpoint drops them BEFORE a user picks one;
+	// on fetch failure the curated list stands unfiltered (last-known-good
+	// wins, the evict-on-error loop is the fallback net).
 		const liveIds = await fetchLiveZenModelIds();
 		const list = liveIds ? curated.filter((e) => liveIds.has(e.id)) : curated;
 		if (list.length === 0) {
@@ -857,10 +848,10 @@ function evictModel(modelId: string): ZenModelConfig[] {
 	return current;
 }
 
-// ─── Provider Registration ───────────────────────────────────────────────────
+// Provider Registration
 
 function registerProvider(pi: ExtensionAPI, models: ZenModelConfig[]): number {
-	// ── Bridge-health gate ──
+	// Bridge-health gate
 	// A fresh canary "fail" means the shipped wire recipe no longer passes
 	// Zen's free-tier gate — registering the models would only offer turns
 	// that fail. Hide them instead: the provider keeps its identity (a saved
@@ -931,7 +922,7 @@ function applyFreeModelsIfChanged(pi: ExtensionAPI, knownAt: number): boolean {
 	return true;
 }
 
-// ─── Error UX ───────────────────────────────────────────────────────────────
+// Error UX
 //
 // Zen's free models return 429 with { type: "FreeUsageLimitError", ... }
 // when the free-tier quota is exhausted, and pi surfaces the raw JSON blob.
@@ -992,9 +983,9 @@ function zenQuotaFriendlyError(msg: FailedAssistantMessage): string | undefined 
 }
 
 // Zen's free tier also rejects a request outright with 403 FreeTierError.
-// The old reading here — "the anonymous allowance is spent" — was inference,
-// and the Oct 2026 breakage disproved it: a perfectly-shaped request 403'd
-// because pi-zen's session-id scheme had rotted. Zen's own error taxonomy
+// The old reading here — "the anonymous allowance is spent" — was wrong: a
+// perfectly-shaped request 403'd because pi-zen's session-id scheme had
+// rotted. Zen's own error taxonomy
 // draws the line we now encode: 429 FreeUsageLimitError = quota (recoverable
 // by waiting / a key); 403 FreeTierError = the request failed the gate check
 // ("free tier can only be used from within OpenCode") = OUR integration no
@@ -1045,7 +1036,7 @@ function zenDeprecatedFriendlyError(msg: FailedAssistantMessage): string | undef
 	].join("\n");
 }
 
-// ─── Compaction shaping ───────────────────────────────────────────────────────
+// Compaction shaping
 //
 // pi's compaction (manual /compact, threshold auto-compact, overflow recovery)
 // does NOT go through before_provider_request: it calls the provider directly
@@ -1103,7 +1094,7 @@ function zenCompactionStreamFn(sessionId: string, authHeaders: ProviderHeaders |
 		});
 }
 
-// ─── Extension Entry ─────────────────────────────────────────────────────────
+// Extension Entry
 
 export default async function (pi: ExtensionAPI) {
 	// Register SYNCHRONOUSLY, before the first await.
@@ -1112,10 +1103,7 @@ export default async function (pi: ExtensionAPI) {
 	// await an async extension factory. A registration that sits behind a
 	// network fetch is therefore invisible to that resolution, and a session
 	// that asked for a Zen model gets dropped onto the first authenticated
-	// native model instead. That used to need a session_start repair, which
-	// could not tell a resumed Zen session from a delegated child carrying its
-	// parent's branch — it broke pi-subagents children (they reported 'big-
-	// pickle' instead of their launch model).
+	// native model instead.
 	//
 	// The model list never requires the network — see knownModelsSync, which
 	// owns the source order and is sync by contract. Register from it, then
@@ -1136,7 +1124,7 @@ export default async function (pi: ExtensionAPI) {
 	// Refresh from the network. Replaces the seed if the live list differs.
 	await refreshAndRegister(pi);
 
-	// ─── Events ──────────────────────────────────────────────────────────────
+	// Events
 
 	// Background revalidation every 2 h. The request is conditional, so an
 	// unchanged list costs a body-less 304 — and only a REAL list change
@@ -1198,7 +1186,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ─── Request lifecycle ──────────────────────────────────────────────────────
+	// Request lifecycle
 
 	// Identity headers, per request: a `ses_...` pinned to pi's session (Zen keys
 	// sticky provider routing and prompt cache on it), echoed under the four
@@ -1344,7 +1332,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ─── Commands ────────────────────────────────────────────────────────────
+	// Commands
 
 	// No custom commands: pi already provides /model (pick a model) and /login
 	// (auth). This extension only registers the provider + free models.

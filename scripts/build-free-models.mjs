@@ -19,16 +19,15 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { apiForEndpoint } from "./zen-endpoints.mjs";
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// Config
 
 const DOCS_URL = "https://opencode.ai/docs/zen";
 // The gateway is the source of truth for what's actually served; the docs
 // page lags it (see the live filter in main()).
 const INFERENCE_BASE = "https://opencode.ai/inference/v1";
 const MODELS_DEV_URL = "https://models.dev/api.json";
-// Registry (not the GitHub API) so the Action needs no token and no rate budget.
-// opencode renamed its npm package: opencode-ai is frozen at 1.19.4,
-// @opencode/cli is the live one. Query the encoded scoped name.
+// npm registry (not the GitHub API): no token, no rate budget. @opencode/cli
+// is the live package (opencode-ai froze at 1.19.4); the slash is URL-encoded.
 const OPENCODE_NPM_URL = "https://registry.npmjs.org/@opencode%2fcli/latest";
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -36,8 +35,6 @@ const FETCH_TIMEOUT_MS = 15_000;
 // endpoint-family tests). It throws on an unrecognized endpoint: a new Zen
 // route must be mapped there explicitly rather than silently entering the
 // picker as a chat model.
-
-// ─── Args ────────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -47,8 +44,7 @@ const outDir = outIdx !== -1 ? args[outIdx + 1] : ".";
 const overridesIdx = args.indexOf("--overrides");
 const overridesPath = overridesIdx !== -1 ? args[overridesIdx + 1] : null;
 
-// ─── YAML Parser (minimal) ───────────────────────────────────────────────────
-//
+// YAML parser (minimal)
 // Just enough to parse overrides.yml:
 //   key: value
 //   key:
@@ -103,7 +99,7 @@ function loadOverrides(path) {
 	}
 }
 
-// ─── Fetch helpers ───────────────────────────────────────────────────────────
+// Fetch helpers
 
 async function fetchText(url) {
 	const res = await fetch(url, {
@@ -123,7 +119,7 @@ async function fetchJSON(url) {
 	return res.json();
 }
 
-// ─── Step 1: Parse the docs table ────────────────────────────────────────────
+// Docs table parsing
 
 /**
  * Accept a row only when its endpoint cell is actually a URL. The docs table
@@ -169,7 +165,7 @@ function stripTags(html) {
 	return html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
-// ─── Step 2: Identify free models ─────────────────────────────────────────────
+// Free-model identification
 
 /**
  * Zen marks free models in two ways: a `-free` id suffix (the normal case) or
@@ -205,7 +201,7 @@ const KNOWN_FREE_ALIASES = [
 	},
 ];
 
-// ─── Step 3: Enrich with models.dev metadata ─────────────────────────────────
+// models.dev metadata enrichment
 
 function enrichWithMetadata(freeIds, devSlice, liveZenIds) {
 	const models = [];
@@ -263,7 +259,7 @@ function enrichWithMetadata(freeIds, devSlice, liveZenIds) {
 	return models;
 }
 
-// ─── Shared helpers (mirrored from index.ts for standalone use) ───────────────
+// Shared helpers (mirrored from shared.ts for standalone use)
 
 function humanize(id) {
 	return id
@@ -289,7 +285,7 @@ function needsReasoningReplay(meta) {
 	return meta?.interleaved?.field === "reasoning_content";
 }
 
-// ─── Default model selection ─────────────────────────────────────────────────
+// Default model selection
 
 /**
  * Compute the recommended default model.
@@ -325,8 +321,6 @@ function pickDefaultModel(models) {
 
 	return best?.id ?? null;
 }
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
 	// Load overrides
@@ -383,10 +377,9 @@ async function main() {
 		console.error(`⚠️  models.dev fetch failed: ${err.message} — using defaults`);
 	}
 
-	// Live gate: the docs page lags the gateway (2026-10-21: it still listed
-	// exo-free/ll-alpha-free/mimo-v2.5-free/nemotron-3-ultra-free after Zen
-	// stopped serving them). Drop curated entries the public /models endpoint
-	// no longer lists; on fetch failure the docs list stands unfiltered.
+	// Live gate: the docs page lags the gateway — it kept listing models
+	// after Zen stopped serving them. Drop curated entries the public /models
+	// endpoint no longer lists; on fetch failure the docs list stands unfiltered.
 	let liveZenIds = null;
 	try {
 		const zenModels = await fetchJSON(`${INFERENCE_BASE}/models`);
@@ -441,3 +434,4 @@ main().catch((err) => {
 	console.error(`❌ Build failed: ${err.message}`);
 	process.exit(1);
 });
+
