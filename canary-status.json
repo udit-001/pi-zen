@@ -1,7 +1,9 @@
 {
-	"verdict": "pass",
-	"checkedAt": "2026-10-23T12:39:50.484Z",
+	"verdict": "inconclusive",
+	"checkedAt": "2026-10-24T12:02:40.056Z",
 	"probed": [
-		"big-pickle"
+		"big-pickle",
+		"glm-5.3-flash-free",
+		"deepseek-v4.1-flash-free"
 	]
 }
