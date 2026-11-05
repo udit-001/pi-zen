@@ -1,6 +1,6 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-11-05T13:52:35.054Z",
+	"generatedAt": "2026-11-05T23:10:39.573Z",
 	"source": "https://opencode.ai/docs/zen",
 	"count": 10,
 	"defaultModel": "big-pickle",
@@ -35,8 +35,8 @@
 		{
 			"id": "crouton-alpha-free",
 			"name": "Crouton Alpha Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
+			"api": "openai-responses",
+			"endpoint": "https://opencode.ai/inference/openai/v1/responses",
 			"reasoning": true,
 			"thinkingLevelMap": {
 				"off": null,
@@ -59,13 +59,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 270000,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false
-			}
+			"compat": {}
 		},
 		{
 			"id": "pulse-alpha-free",
