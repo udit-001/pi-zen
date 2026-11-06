@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-11-06T13:38:19.086Z",
+	"generatedAt": "2026-11-06T22:38:16.244Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 10,
+	"count": 9,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "2.2.5",
 	"models": [
@@ -60,41 +60,6 @@
 			"contextWindow": 1048576,
 			"maxTokens": 270000,
 			"compat": {}
-		},
-		{
-			"id": "pulse-alpha-free",
-			"name": "Pulse Alpha Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"thinkingLevelMap": {
-				"off": null,
-				"minimal": null,
-				"low": "low",
-				"medium": null,
-				"high": "high",
-				"xhigh": null,
-				"max": "max"
-			},
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 131072,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false
-			}
 		},
 		{
 			"id": "glm-5.3-flash-free",
