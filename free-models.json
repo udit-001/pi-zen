@@ -1,8 +1,8 @@
 {
 	"$schema": "./free-models.schema.json",
-	"generatedAt": "2026-11-22T13:55:56.228Z",
+	"generatedAt": "2026-11-22T23:07:15.272Z",
 	"source": "https://opencode.ai/docs/zen",
-	"count": 12,
+	"count": 11,
 	"defaultModel": "big-pickle",
 	"opencodeVersion": "2.3.2",
 	"models": [
@@ -208,33 +208,6 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
-			"compat": {
-				"maxTokensField": "max_tokens",
-				"supportsStore": false,
-				"supportsReasoningEffort": true,
-				"supportsDeveloperRole": false,
-				"supportsUsageInStreaming": false,
-				"requiresReasoningContentOnAssistantMessages": true
-			}
-		},
-		{
-			"id": "longcat-2.5-free",
-			"name": "LongCat 2.5 Free",
-			"api": "openai-completions",
-			"endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1000000,
-			"maxTokens": 262144,
 			"compat": {
 				"maxTokensField": "max_tokens",
 				"supportsStore": false,
